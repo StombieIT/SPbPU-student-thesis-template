@@ -1,146 +1,586 @@
-\chapter{Краткие инструкции по настройке издательской системы \LaTeX}\label{appendix-MikTeX-TexStudio}							% Заголовок
-%\addcontentsline{toc}{chapter}{Second call for chapters to participate in the book Machine learning in analysis of biomedical and socio-economic data}	% Добавляем его в оглавление
+\chapter{Программный код API-Шлюза}
 
-В SPbPU-BCI-template {\itshape автоматически выставляются необходимые настройки и в исходном тексте шаблона приведены примеры оформления текстово-графических объектов}, поэтому авторам достаточно заполнить имеющийся шаблон текстом главы (статьи), не вдаваясь в детали оформления, описанные далее. Возможный <<быстрый старт>> оформления главы (статьи) под Windows следующий\footnote{Внимание! Пример оформления подстрочной ссылки (сноски).}:
-
-\begin{enumerate}
-	\item Установка полной версии MikTeX  \cite{latex-miktex}.  В процессе установки лучше выставить параметр доустановки пакетов <<на лету>>.
-	
-	\item Установка TexStudio \cite{latex-texstudio}.
-	
-%		\item установка шрифтов PSCyr для работы с TimesNew\-Roman\-PSMT  	\href{https://github.com/AndreyAkinshin/Russian-Phd-LaTeX-Dissertation-Template/blob/master/PSCyr/Windows.md}{по данной инструкции}. В итоговом документе будет, скорее всего, использован Newton.
-	
-%	\item Переименование следующих файлов, где вместо \texttt{AuthorsSur\-names} необходимо подставить фамилии авторов (можно сокращать до первых четырех букв): 
-%	
-%	\begin{enumerate}
-%		\item Основной файл \texttt{Book\_title\_ch\_Authors\-Sur\-names.tex}.
-%		\item Библиография \texttt{biblio\textbackslash{}Book\_title\_bib\_Authors\-Sur\-na\-mes\-.bib}.
-%		\item Пользовательские настройки (при необходимости), \texttt{common\textbackslash{}Book\_\-tit\-le\_ext\_Authors\-Sur\-names.tex}. 
-%	\end{enumerate}
-%	
-%	\item После открытия основного файла \texttt{Book\_title\_ch\_Authors\-Sur\-names.tex} (с новым названием)   переименовать названия по аналогии в следующих командах \texttt{\textbackslash{}input\{\}}:
-%	
-%	\begin{enumerate}
-%		\item \texttt{biblio/Book\_title\_bib\_Authors\-Sur\-names.bib},
-%		\item \texttt{common/Book\_title\_ext\_Authors\-Sur\-names.tex (при необходимости) }.
-%	\end{enumerate}
-%	
-	
-	\item Запуск TexStudio и компиляция \verb|my_chapter.tex| с помощью команды <<Build\&View>> (например, с помощью двойной зелёной стрелки в верхней панели). {\itshape Иногда, для достижения нужного результата необходимо несколько раз скомпилировать документ.}
-	
-	\item В случае, если не отобразилась библиография, можно
-	
-	\begin{itemize}
-		\item воспользоваться командой Tools $\to$ Commands $\to$ Biber, затем запустив Build\&View;
+	\begin{lstlisting}[caption={config.ts}]
+		import { registerAs } from '@nestjs/config';
 		
-		\item настроить автоматическое включение библиографии в настройках Options $\to$ Configure TexStudio $\to$ Build $\to$  Build\&View (оставить по умолчанию, если сборка происходит слишком долго): \texttt{txs:///pdflatex | txs:///biber | txs:///pdflatex | txs:///pdflatex | txs:///\-view-pdf}.
-	\end{itemize}
-	
-\end{enumerate}
+		export const AmqpConfig = registerAs('amqp', () => ({
+			connectionString: process.env.AMQP_CONNECTION_STRING,
+			chunkUploadExchange: process.env.CHUNK_UPLOAD_AMQP_EXCHANGE,
+			chunkUploadQueue: process.env.CHUNK_UPLOAD_AMQP_QUEUE,
+			chunkReplyQueue: process.env.CHUNK_REPLY_AMQP_QUEUE,
+		}));
+		
+		export const AuthConfig = registerAs('auth', () => ({
+			passwordHashSecret: process.env.PASSWORD_HASH_SECRET,
+			jwtSecret: process.env.JWT_SECRET,
+			refreshTokenLifetime: process.env.REFRESH_TOKEN_LIFETIME,
+			accessTokenLifetime: process.env.ACCESS_TOKEN_LIFETIME,
+		}));
+		
+		export const HolderConfig = registerAs('holder', () => ({
+			'baseUrl': process.env.HOLDER_BASE_URL,
+			'manifestName': process.env.manifestName,
+		}));
+		
+		export const RedisConfig = registerAs('redis', () => ({
+			connectionString: process.env.REDIS_CONNECTION_STRING,
+			videoCacheDB: parseInt(process.env.VIDEO_CACHE_DB, 10)
+		}));
+	\end{lstlisting}
 
-В случае возникновения ошибок, попробуйте скомпилировать документ до последних действий или внимательно ознакомьтесь с описанием проблемы в log-файле. Бывает полезным переход (по подсказке TexStudio) в нужную строку в pdf-файле или запрос с текстом ошибке в поисковиках. Наиболее вероятной проблемой при первой компиляции может быть отсутствие какого-либо установленного пакета \LaTeX. 
+	\begin{lstlisting}[caption={auth.controller.ts}]
+		import { Body, Controller, HttpException, Post } from '@nestjs/common';
+		
+		@Controller('auth')
+		export class AuthController {
+			constructor(private readonly auth: AuthService) {
+			}
+			
+			@Post('register')
+			async register(@Body() { email, password }: Gateway.Request.Register): Promise<Gateway.Response.Register> {
+				try {
+					await this.auth.register(email, password);
+					return {
+						status: 'success',
+						message: 'Successfully registered user',
+					};
+				} catch (err) {
+					throw new HttpException({
+						status: 'error',
+						messsage: 'User has already registered',
+					}, 400);
+				}
+			}
+			
+			@Post('login')
+			async login(@Body() { email, password }: Gateway.Request.Login): Promise<Gateway.Response.Login> {
+				try {
+					const tokens = await this.auth.login(email, password);
+					return {
+						status: 'success',
+						message: 'Successfully logged in',
+						payload: tokens,
+					};
+				} catch (err) {
+					throw new HttpException({
+						status: 'error',
+						message: 'Credentials are invalid',
+					}, 400);
+				}
+			}
+			
+			@Post('refresh')
+			async refresh(@Body() { refreshToken }: Gateway.Request.Refresh) {
+				try {
+					const tokens = await this.auth.refreshToken(refreshToken);
+					return {
+						status: 'success',
+						message: 'Successfully refreshed',
+						payload: tokens,
+					};
+				} catch (err) {
+					throw new HttpException({
+						status: 'error',
+						message: 'Token is invalid',
+					}, 400);
+				}
+			}
+		}
+	\end{lstlisting}
 
-В случае корректной работы настройки <<установка на лету>> все дополнительные пакеты будут скачиваться и устанавливаться в автоматическом режиме. Если доустановка пакетов осуществляется медленно (несколько пакетов за один запуск компилятора), то можно попробовать установить их в ручном режиме следующим образом:
+	 \begin{lstlisting}[caption={auth.service.ts}]
+	 	import { Repository } from 'typeorm';
+	 	import { JwtService } from '@nestjs/jwt';
+	 	import { Injectable } from '@nestjs/common';
+	 	import { InjectRepository } from '@nestjs/typeorm';
+	 	import { ConfigService } from '@nestjs/config';
+	 	import * as crypto from 'crypto';
+	 	
+	 	@Injectable()
+	 	export class AuthService {
+	 		private readonly passwordHashSecret: string;    
+	 		private readonly refreshTokenLifetime: string;
+	 		private readonly accessTokenLifetime: string;
+	 		
+	 		constructor(configService: ConfigService,
+	 		private readonly jwt: JwtService,
+	 		@InjectRepository(User) private readonly users: Repository<User>) {
+	 			this.passwordHashSecret = configService.get('auth.passwordHashSecret', 'passworf-hash-secret');
+	 			this.refreshTokenLifetime = configService.get('auth.refreshTokenLifetime', '1d');
+	 			this.accessTokenLifetime = configService.get('auth.accessTokenLifetime', '30m');
+	 		}
+	 		
+	 		async register(email: string, password: string): Promise<User> {
+	 			const existingUser = await this.users.findOneBy({
+	 				email,
+	 			});
+	 			if (existingUser) {
+	 				throw new Error(`User with email ${email} already exists`);
+	 			}
+	 			const newUser = this.users.create({
+	 				email,
+	 				passwordHash: this.hash(password),
+	 			});
+	 			await this.users.save(newUser);
+	 			return newUser;
+	 		}
+	 		
+	 		async login(email: string, password: string): Promise<Gateway.OAuthTokens> {
+	 			const user = await this.verifyUser(email, password);
+	 			return this.generateTokens(user.id);
+	 		}
+	 		
+	 		async refreshToken(token: string): Promise<Gateway.OAuthTokens> {
+	 			try {
+	 				const { sub: id } = await this.jwt.verifyAsync(token);
+	 				return this.generateTokens(id);
+	 			} catch (err) {
+	 				throw new Error(`Invalid refresh token ${token}`);
+	 			}
+	 		}
+	 		
+	 		async verifyUserByToken(token: string) {
+	 			const { sub: id } = await this.jwt.verifyAsync(token);
+	 			const user = await this.users.findOneBy({
+	 				id,
+	 			});
+	 			if (!user) {
+	 				throw new Error('Token is not verified');
+	 			}
+	 			return user;
+	 		}
+	 		
+	 		private async verifyUser(email: string, password: string) {
+	 			const user = await this.users.findOneBy({
+	 				email,
+	 			});
+	 			if (!user || user.passwordHash !== this.hash(password)) {
+	 				throw new Error('User is not verified');
+	 			}
+	 			return user;
+	 		}
+	 		
+	 		private async generateTokens(userId: string): Promise<Gateway.OAuthTokens> {
+	 			const payload = { sub: userId };
+	 			const [refreshToken, accessToken] = await Promise.all([
+	 			this.jwt.signAsync(payload, { expiresIn: this.refreshTokenLifetime }),
+	 			this.jwt.signAsync(payload, { expiresIn: this.accessTokenLifetime }),
+	 			]);
+	 			
+	 			return {
+	 				refreshToken,
+	 				accessToken,
+	 			};
+	 		}
+	 		
+	 		private hash(str: string) {
+	 			return crypto.createHmac('sha256', this.passwordHashSecret)
+	 			.update(str)
+	 			.digest('hex');
+	 		}
+	 	}
+	 \end{lstlisting}
+	 
+	 \begin{lstlisting}[caption={auth.guard.ts}]
+		import { ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
+		import { AuthGuard as PassportAuthGuard } from '@nestjs/passport';
+		import { AuthService } from './auth.service';
+		import { Request } from 'express';
+		
+		@Injectable()
+		export class AuthGuard extends PassportAuthGuard('local') {
+			constructor(private readonly auth: AuthService) {
+				super();
+			}    
+			
+			async canActivate(context: ExecutionContext): Promise<boolean> {
+				const request = context.switchToHttp().getRequest<Request>();
+				const authHeader = request.headers['authorization'];
+				if (!authHeader || !authHeader.startsWith('Bearer ')) {
+					throw new UnauthorizedException('Authorization token required');
+				}
+				const [, token] = authHeader.split(' ');
+				try {
+					const user = await this.auth.verifyUserByToken(token);
+					request.user = user;
+					return Boolean(user);
+				} catch (err) {
+					throw new UnauthorizedException('Token is not valid');
+				}
+			}
+		}
+	 \end{lstlisting}
 
-\begin{enumerate}[1.]
-	\item Запустите программу: меню $\to$ все программы $\to$ MikTeX $\to$ Maintenance (Admin) $\to$ MiKTeX Package Manager (Admin).
-	\item Пользуясь поиском, убедитесь, что нужный пакет присутствует, но не установлен (если пакет отсутствует воспользуйтесь сначала MiKTeX Update (Admin)).
-	\item Выделив строку с пакетом (возможно выбрать несколько или вообще все неустановленные пакеты), выполните установку Tools $\to$ Install или с помощью контекстного меню.
-	\item После завершения установки запустите программу MiKTeX Settings (Admin).
-	\item Обновите базу данных имен файлов Refresh FNDB.
-\end{enumerate}
+	 \begin{lstlisting}[caption={app.controller.ts}]
+	 	import { Body, Controller, Param, Get, Post, Req, UseGuards, Headers, Logger, HttpException, HttpStatus } from '@nestjs/common';
+	 	import { Request } from 'express';
+	 	
+	 	@Controller()
+	 	export class AppController {
+	 		private readonly logger = new Logger(AppController.name);    
+	 		
+	 		constructor(private readonly app: AppService) {
+	 		}
+	 		
+	 		@UseGuards(AuthGuard)
+	 		@Get('me')
+	 		async me(@Req() request: Request): Promise<Gateway.Response.Me> {
+	 			try {
+	 				const { user } = request;
+	 				const { id, email, createdAt } = user;
+	 				return {
+	 					status: 'success',
+	 					payload: { id, email, createdAt },
+	 				};
+	 			} catch (error) {
+	 				throw new HttpException(
+	 				{
+	 					status: 'error',
+	 					message: error.message, 
+	 				},
+	 				HttpStatus.BAD_GATEWAY,
+	 				);
+	 			}
+	 		}
+	 		
+	 		@UseGuards(AuthGuard)
+	 		@Post('create-video')
+	 		async createVideo(@Req() request: Request,
+	 		@Body() { title, description, totalBytesList }: Gateway.Request.CreateVideo): Promise<Gateway.Response.CreateVideo> {
+	 			try {
+	 				const { user } = request;
+	 				const video = await this.app.createVideo({
+	 					title,
+	 					description,
+	 					totalBytesList,
+	 				}, user);
+	 				return {
+	 					status: 'success',
+	 					payload: video,
+	 				};
+	 			} catch (error) {
+	 				throw new HttpException(
+	 				{
+	 					status: 'error',
+	 					message: error.message,
+	 				},
+	 				HttpStatus.BAD_GATEWAY,
+	 				);
+	 			}
+	 		}
+	 		
+	 		@UseGuards(AuthGuard)
+	 		@Post('upload/:sessionId')
+	 		async upload(
+	 		@Req() request: Request,
+	 		@Param('sessionId') sessionId: string,
+	 		@Headers('x-start-byte') startByteHeader: string,
+	 		@Headers('x-size') sizeHeader: string,
+	 		@Body() content: Buffer,
+	 		): Promise<Gateway.Response.Upload> {
+	 			try {
+	 				const startByte = Number(startByteHeader);
+	 				if (isNaN(startByte)) {
+	 					throw new Error('Start byte is not number');
+	 				}
+	 				const size = Number(sizeHeader);
+	 				if (isNaN(size)) {
+	 					throw new Error('Size is not number');
+	 				}
+	 				const { user } = request;
+	 				await this.app.upload({
+	 					sessionId,
+	 					startByte,
+	 					size,
+	 					content,
+	 				}, user);
+	 				return {
+	 					status: 'success',
+	 					message: 'Chunk is successfully uploaded',
+	 				};
+	 			} catch (error) {
+	 				const status = (() => {
+	 					if (error instanceof NotFoundError) {
+	 						return HttpStatus.NOT_FOUND;
+	 					}
+	 					
+	 					if (error instanceof NoRightsError) {
+	 						return HttpStatus.UNAUTHORIZED;
+	 					}
+	 					
+	 					return HttpStatus.BAD_REQUEST;
+	 				})();
+	 				throw new HttpException(
+	 				{
+	 					status: 'error',
+	 					message: error.message,
+	 				},
+	 				status,
+	 				);
+	 			}
+	 		}
+	 		
+	 		@Get('state/:videoId')
+	 		async state(@Param('videoId') videoId: string): Promise<Gateway.Response.State> {
+	 			try {
+	 				const state = await this.app.state(videoId);
+	 				return {
+	 					status: 'success',
+	 					payload: state,
+	 				};
+	 			} catch (error) {
+	 				const status = (() => {
+	 					if (error instanceof NotFoundError) {
+	 						return HttpStatus.NOT_FOUND;
+	 					}
+	 					
+	 					return HttpStatus.BAD_REQUEST;
+	 				})();
+	 				throw new HttpException(
+	 				{
+	 					status: 'error',
+	 					message: error.message,
+	 				},
+	 				status,
+	 				);
+	 			}
+	 		}
+	 	}
+	 \end{lstlisting}
+	 
+	 \begin{lstlisting}[caption={app.service.ts}]
+	 	import { Repository } from 'typeorm';
+	 	import { Injectable } from '@nestjs/common';
+	 	import { InjectRepository } from '@nestjs/typeorm';
+	 	
+	 	@Injectable()
+	 	export class AppService {
+	 		constructor(private readonly chunkExchange: ChunkExchangeService,
+	 		@InjectRepository(User) private readonly users: Repository<User>,
+	 		@InjectRepository(Video) private readonly videos: Repository<Video>,
+	 		@InjectRepository(Flow) private readonly flows: Repository<Flow>,
+	 		@InjectRepository(UploadSession) private readonly uploadSessions: Repository<UploadSession>,
+	 		private readonly videoConverter: VideoConverterService) {
+	 		}
+	 		
+	 		async createVideo({ title, description, totalBytesList }: Gateway.VideoPayload, owner: User): Promise<Gateway.SmallVideo> {
+	 			const video = this.videos.create({
+	 				title,
+	 				description,
+	 				user: owner,
+	 			});
+	 			await this.videos.save(video);
+	 			const flows = totalBytesList.map(() => this.flows.create({
+	 				video,
+	 			}));
+	 			await this.flows.save(flows);
+	 			const uploadSessions = totalBytesList.map((totalBytes, idx) => {
+	 				const flow = flows[idx];
+	 				const uploadSession = this.uploadSessions.create({
+	 					totalBytes,
+	 					flow,
+	 				});
+	 				return uploadSession;
+	 			});
+	 			await this.uploadSessions.save(uploadSessions);
+	 			
+	 			flows.forEach((flow, idx) => {
+	 				flow.uploadSession = uploadSessions[idx];
+	 			});
+	 			video.flows = flows;
+	 			return this.videoConverter.toSmallVideo(video);
+	 		}
+	 		
+	 		async upload(chunk: IVideoChunk, owner: User) {
+	 			const { sessionId } = chunk;
+	 			const uploadSession = await this.uploadSessions.findOne({
+	 				where: {
+	 					id: sessionId,
+	 				},
+	 				relations: {
+	 					flow: {
+	 						video: {
+	 							user: true,
+	 						},
+	 					},
+	 				},
+	 			});
+	 			
+	 			if (!uploadSession) {
+	 				throw new NotFoundError(`Session ${sessionId} not found`);
+	 			}
+	 			const { flow } = uploadSession;
+	 			const { video } = flow;
+	 			const { user } = video;
+	 			if (user.id !==  owner.id) {
+	 				throw new NoRightsError('Session owner mismatches');
+	 			}
+	 			
+	 			await this.chunkExchange.push(chunk);
+	 		}
+	 		
+	 		async state(videoId: string): Promise<Gateway.SmallVideo> {
+	 			const video = await this.videos.findOne({
+	 				where: {
+	 					id: videoId,
+	 				},
+	 				relations: {
+	 					flows: {
+	 						uploadSession: true,
+	 					},
+	 				},
+	 			});
+	 			
+	 			if (!video) {
+	 				throw new NotFoundError(`Video ${videoId} is not found`);
+	 			}
+	 			
+	 			return this.videoConverter.toSmallVideo(video);
+	 		}
+	 	}
+	 \end{lstlisting}
+	 
+	 \begin{lstlisting}[caption={chunk-exchange.service.ts}]
+	 	import { randomUUID } from 'crypto';
+	 	import { Injectable, OnModuleInit } from '@nestjs/common';
+	 	import { ConfigService } from '@nestjs/config';
+	 	import { IVideoChunk, retry, Task } from '@stombie/retube-core';
+	 	import { connect as amqpConnect, ConfirmChannel, Connection, Message } from 'amqplib';
+	 	
+	 	@Injectable()
+	 	export class ChunkExchangeService implements OnModuleInit { 
+	 		private readonly amqpConnectionString: string;
+	 		private readonly chunkUploadExchange: string;
+	 		private readonly chunkUploadQueue: string;
+	 		private readonly chunkReplyQueue: string;
+	 		private readonly taskByCorrelationId: Record<string, Task>;
+	 		
+	 		private initPromise: Promise<void> | null = null;
+	 		private connection: Maybe<Connection>;
+	 		private channel: Maybe<ConfirmChannel>;
+	 		
+	 		constructor(configService: ConfigService) {
+	 			this.amqpConnectionString = configService.get<string>('amqp.connectionString', 'amqp://localhost');
+	 			this.chunkUploadExchange = configService.get<string>('amqp.chunkUploadExchange', 'chunk-exchange');
+	 			this.chunkUploadQueue = configService.get<string>('amqp.chunkUploadQueue', 'chunk-upload');
+	 			this.chunkReplyQueue = configService.get<string>('amqp.chunkReplyQueue', 'chunk-reply');
+	 			this.taskByCorrelationId = {};
+	 		}
+	 		
+	 		onModuleInit() {
+	 			if (!this.initPromise) {
+	 				this.initPromise = this.init();
+	 			}
+	 			
+	 			return this.initPromise;
+	 		}
+	 		
+	 		push({ sessionId, content, startByte, size }: IVideoChunk): Promise<void> {
+	 			const chunkId = randomUUID();
+	 			const headers = {
+	 				'x-session-id': sessionId,
+	 				'x-start-byte': startByte,
+	 				'x-size': size,
+	 				'x-correlation-id': chunkId,
+	 			};
+	 			
+	 			const routingKey = `chunk.${chunkId}`;
+	 			
+	 			return new Promise((resolve, reject) => {
+	 				this.channel.publish(
+	 				this.chunkUploadExchange,
+	 				routingKey,
+	 				content,
+	 				{ headers },
+	 				(err) => {
+	 					if (err) {
+	 						reject(err);
+	 						return;
+	 					}
+	 					this.taskByCorrelationId[chunkId] = { resolve, reject };
+	 				}
+	 				);
+	 			});
+	 		}
+	 		
+	 		private async init() {
+	 			this.connection = await retry(() => amqpConnect(this.amqpConnectionString));
+	 			this.channel = await this.connection.createConfirmChannel();
+	 			await Promise.all([
+	 			this.channel.assertExchange(this.chunkUploadExchange, 'topic', { durable: false }),
+	 			this.channel.assertQueue(this.chunkUploadQueue, { durable: false }),
+	 			this.channel.assertQueue(this.chunkReplyQueue, { durable: false }),
+	 			]);
+	 			await this.channel.bindQueue(this.chunkUploadQueue, this.chunkUploadExchange, 'chunk.*');
+	 			this.channel.consume(this.chunkReplyQueue, this.handleReply);
+	 		}
+	 		
+	 		private handleReply = (message: Message) => {
+	 			const { headers } = message.properties;
+	 			if (!headers ||
+	 			typeof headers['x-correlation-id'] !== 'string' ||
+	 			typeof headers['x-status'] !== 'string' ||
+	 			(headers['x-status'] !== 'ack' &&
+	 			headers['x-status'] !== 'nack')) {
+	 				this.channel.nack(message);
+	 				return;
+	 			}
+	 			const correlationId = headers['x-correlation-id'];
+	 			if (!this.taskByCorrelationId[correlationId]) {
+	 				this.channel.nack(message);
+	 				return;
+	 			}
+	 			this.channel.ack(message);
+	 			const task = this.taskByCorrelationId[correlationId];
+	 			delete this.taskByCorrelationId[correlationId];
+	 			if (headers['x-status'] === 'ack') {
+	 				task.resolve();
+	 				return;
+	 			}
+	 			const error = headers['x-error'];
+	 			if (typeof error === 'string') {
+	 				task.reject(new Error(error));
+	 				return;
+	 			}
+	 			task.reject(new Error(`Chunk ${correlationId} rejected with no reason`));
+	 		}
+	 	}
+	 \end{lstlisting}
 
-
-Для проверки текста статьи на русском языке полезно также воспользоваться настройками Options $\to$ Configure TexStudio $\to$ Language Checking $\to$  Default Language. Если русский язык <<ru\_RU>> не будет доступен в меню выбора, то необходимо вначале выполнить Import Dictionary, скачав из интернета любой русскоязычный словарь. 
-
-
-%\chapter{\normalfont\normalsize{}Часто задаваемые вопросы (FAQ)}\label{Appendix-FAQ}							% Заголовок
-%%\addcontentsline{toc}{chapter}{Second call for chapters to participate in the book Machine learning in analysis of biomedical and socio-economic data}	% Добавляем его в оглавление
-
-
-Далее приведены формулы \eqref{eq:Pi-app2}, \eqref{eq:Pi-app2-},  \firef{fig:spbpu_hydrotower-app2}, \firef{fig:spbpu_hydrotower-app2-}, \taref{tab:ToyCompare-app2}, \taref{tab:ToyCompare-app2-}.
-
-
-\begin{equation}% лучше не оставлять пропущенную строку (\par) перед окружениями для избежания лишних отсупов в pdf
-\label{eq:Pi-app2-} % eq - equations, далее название, ch поставлено для избежания дублирования
-\pi \approx 3,141.
-\end{equation}
-
-%
-\begin{figure}[ht!] 
-	\center
-	\includegraphics [scale=0.27] {my_folder/images//spbpu_hydrotower}
-	\caption{Вид на гидробашню СПбПУ \cite{spbpu-gallery}} 
-	\label{fig:spbpu_hydrotower-app2-}  
-\end{figure}
-
-\begin{table} [htbp]% Пример оформления таблицы
-	\centering\small
-	\caption{Представление данных для сквозного примера по ВКР \cite{Peskov2004}}%
-	\label{tab:ToyCompare-app2-}		
-	\begin{tabular}{|l|l|l|l|l|l|}
-		\hline
-		$G$&$m_1$&$m_2$&$m_3$&$m_4$&$K$\\
-		\hline
-		$g_1$&0&1&1&0&1\\ \hline
-		$g_2$&1&2&0&1&1\\ \hline
-		$g_3$&0&1&0&1&1\\ \hline
-		$g_4$&1&2&1&0&2\\ \hline
-		$g_5$&1&1&0&1&2\\ \hline
-		$g_6$&1&1&1&2&2\\ \hline		
-	\end{tabular}	
-	\normalsize% возвращаем шрифт к нормальному
-\end{table}
-
-
-
-
-\section{Параграф приложения}\label{app-2-1}							
-
-
-\subsection{Название подпараграфа} \label{ch2:subsec-title-abbr} %название по-русски
-
-
-Название подпараграфа оформляется с помощью команды  \texttt{\textbackslash{}subsection\{...\}}.
-
-Использование подподпараграфов в основной части крайне не рекомендуется.
-\subsubsection{Название подподпараграфа}\label{ch2:subsubsec-title-abbr} %название по-русски
-
-\begin{equation}% лучше не оставлять пропущенную строку (\par) перед окружениями для избежания лишних отсупов в pdf
-\label{eq:Pi-app2} % eq - equations, далее название, ch поставлено для избежания дублирования
-\pi \approx 3,141.
-\end{equation}
-%
-%
-\begin{figure}[ht!] 
-	\center
-	\includegraphics [scale=0.27] {my_folder/images//spbpu_hydrotower}
-	\caption{Вид на гидробашню СПбПУ \cite{spbpu-gallery}} 
-	\label{fig:spbpu_hydrotower-app2}  
-\end{figure}
-%
-
-
-
-
-\begin{table}[t!]% Пример оформления таблицы
-	\centering\small
-	\caption{Представление данных для сквозного примера по ВКР \cite{Peskov2004}}%
-	\label{tab:ToyCompare-app2}		
-	\begin{tabular}{|l|l|l|l|l|l|}
-		\hline
-		$G$&$m_1$&$m_2$&$m_3$&$m_4$&$K$\\
-		\hline
-		$g_1$&0&1&1&0&1\\ \hline
-		$g_2$&1&2&0&1&1\\ \hline
-		$g_3$&0&1&0&1&1\\ \hline
-		$g_4$&1&2&1&0&2\\ \hline
-		$g_5$&1&1&0&1&2\\ \hline
-		$g_6$&1&1&1&2&2\\ \hline		
-	\end{tabular}	
-	\normalsize% возвращаем шрифт к нормальному
-\end{table}
-
-
-%% В случае, когда таблица (рисунок) размещаются на последней странице, для переноса названия приложения на новую строку используем:
-\NewPage % начать новое приложение с новой страницы 
+	 \begin{lstlisting}[caption={app.module.ts}]
+	 	import { Module } from '@nestjs/common';
+	 	import { TypeOrmModule } from '@nestjs/typeorm';
+	 	import { ConfigModule, ConfigService } from '@nestjs/config';
+	 	import { JwtModule } from '@nestjs/jwt';
+	 	
+	 	const DB_ENTITIES = [User, Video, Flow, UploadSession];
+	 	
+	 	@Module({
+	 		imports: [
+	 		TypeOrmModule.forRoot({
+	 			type: 'postgres',
+	 			url: process.env.DB_CONNECTION_STRING ?? 'postgresql://postgres:postgres@localhost:5432/retube',
+	 			synchronize: true,
+	 			entities: DB_ENTITIES,
+	 		}),
+	 		TypeOrmModule.forFeature(DB_ENTITIES),
+	 		ConfigModule.forRoot({
+	 			isGlobal: true,
+	 			load: [AmqpConfig, RedisConfig, AuthConfig, HolderConfig],
+	 		}),
+	 		JwtModule.registerAsync({
+	 			imports: [ConfigModule],
+	 			inject: [ConfigService],
+	 			useFactory: (configService: ConfigService) => ({
+	 				secret: configService.get<string>('auth.jwtSecret'),
+	 			}),
+	 		}),
+	 		],
+	 		controllers: [AuthController, AppController],
+	 		providers: [
+	 		AppService, AuthService, ChunkExchangeService,
+	 		UploadSessionConverterService, FlowConverterService, VideoConverterService, UserConverterService,
+	 		],
+	 	})
+	 	export class AppModule {}
+	 \end{lstlisting}
