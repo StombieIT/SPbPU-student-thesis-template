@@ -1,0 +1,909 @@
+\chapter{Программный код сервиса-загрузчика}
+
+\begin{lstlisting}[caption={ChunkQueueConfiguration.java}]
+	package com.stombie.uploader_v4.config;
+	
+	import com.rabbitmq.client.Channel;
+	import com.rabbitmq.client.Connection;
+	import com.rabbitmq.client.ConnectionFactory;
+	import lombok.SneakyThrows;
+	import org.springframework.beans.factory.annotation.Autowired;
+	import org.springframework.beans.factory.annotation.Value;
+	import org.springframework.context.annotation.Bean;
+	import org.springframework.context.annotation.Configuration;
+	
+	@Configuration
+	public class ChunkQueueConfiguration {
+		private String connectionString;
+		
+		@Autowired
+		public ChunkQueueConfiguration(@Value("${chunkQueue.amqp.connectionString}") String connectionString) {
+			this.connectionString = connectionString;
+		}
+		
+		@SneakyThrows
+		@Bean
+		public Connection connectionFactory()  {
+			ConnectionFactory connectionFactory = new ConnectionFactory();
+			connectionFactory.setUri(connectionString);
+			return connectionFactory.newConnection();
+		}
+		
+		@SneakyThrows
+		@Bean
+		public Channel channel() {
+			return connectionFactory().createChannel();
+		}
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={FFlowCacheConfiguration.java}]
+	package com.stombie.uploader_v4.config;
+	
+	import org.springframework.beans.factory.annotation.Autowired;
+	import org.springframework.beans.factory.annotation.Value;
+	import org.springframework.context.annotation.Bean;
+	import org.springframework.context.annotation.Configuration;
+	import org.springframework.data.redis.connection.RedisConfiguration;
+	import org.springframework.data.redis.connection.RedisStandaloneConfiguration;
+	import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
+	
+	@Configuration
+	public class FFlowCacheConfiguration {
+		private final String host;
+		private final int port;
+		private final int db;
+		
+		@Autowired
+		public FFlowCacheConfiguration(@Value("${cache.redis.host}") String host,
+		@Value("${cache.redis.port}") int port,
+		@Value("${cache.redis.fflowDB}") int db) {
+			this.host = host;
+			this.port = port;
+			this.db = db;
+		}
+		
+		@Bean
+		public RedisConfiguration redisConfiguration() {
+			RedisStandaloneConfiguration redisConfig = new RedisStandaloneConfiguration();
+			redisConfig.setHostName(this.host);
+			redisConfig.setPort(this.port);
+			redisConfig.setDatabase(this.db);
+			return redisConfig;
+		}
+		
+		@Bean
+		public LettuceConnectionFactory redisConnectionFactory() {
+			return new LettuceConnectionFactory(redisConfiguration());
+		}
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={ChunkConsumerService.java}]
+	package com.stombie.uploader_v4.service;
+	
+	import com.rabbitmq.client.AMQP;
+	import com.rabbitmq.client.Channel;
+	import com.rabbitmq.client.Delivery;
+	import com.rabbitmq.client.LongString;
+	import com.stombie.uploader_v4.event.AcceptChunkEvent;
+	import com.stombie.uploader_v4.event.ChunkReceivedEvent;
+	import com.stombie.uploader_v4.event.RejectChunkEvent;
+	import com.stombie.uploader_v4.model.VideoChunk;
+	import jakarta.annotation.PostConstruct;
+	import org.slf4j.Logger;
+	import org.slf4j.LoggerFactory;
+	import org.springframework.beans.factory.annotation.Autowired;
+	import org.springframework.beans.factory.annotation.Value;
+	import org.springframework.context.ApplicationEventPublisher;
+	import org.springframework.context.event.EventListener;
+	import org.springframework.stereotype.Service;
+	
+	import java.io.IOException;
+	import java.nio.charset.StandardCharsets;
+	import java.util.HashMap;
+	import java.util.HashSet;
+	import java.util.Map;
+	import java.util.Set;
+	
+	@Service
+	public class ChunkConsumerService {
+		private static final Logger logger = LoggerFactory.getLogger(ChunkConsumerService.class);
+		
+		private static final String toString(LongString longString) {
+			return new String(longString.getBytes(), StandardCharsets.UTF_8);
+		}
+		
+		private final Channel amqpChannel;
+		private final Set<String> hangingChunkCorrelationIds;
+		private final ApplicationEventPublisher applicationEventPublisher;
+		
+		@Value("${chunkQueue.amqp.uploadQueue}")
+		private String uploadQueue;
+		@Value("${chunkQueue.amqp.replyQueue}")
+		private String replyQueue;
+		@Value("${chunkQueue.amqp.exchange}")
+		private String exchange;
+		
+		@Autowired
+		public ChunkConsumerService(Channel amqpChannel, ApplicationEventPublisher applicationEventPublisher) {
+			this.amqpChannel = amqpChannel;
+			this.hangingChunkCorrelationIds = new HashSet<>();
+			this.applicationEventPublisher = applicationEventPublisher;
+		}
+		
+		@PostConstruct
+		public void init() throws IOException {
+			/* Декларируем очереди именно через passive, так как их инициализацией занимается
+			головной сервис gateway */
+			amqpChannel.queueDeclarePassive(uploadQueue);
+			amqpChannel.queueDeclarePassive(replyQueue);
+			
+			amqpChannel.exchangeDeclare(this.exchange, "topic");
+			amqpChannel.queueBind(this.replyQueue, this.exchange, "reply.*");
+			amqpChannel.basicConsume(this.uploadQueue, false, this::handleDelivery, this::handleCancelDelivery);
+		}
+		
+		@EventListener
+		public void acceptChunk(AcceptChunkEvent event) {
+			String correlationId = event.getCorrelationId();
+			logger.info("Successfully accepted chunk {}", correlationId);
+			this.reply(event.getCorrelationId(), "ack", null);
+		}
+		
+		@EventListener
+		public void rejectChunk(RejectChunkEvent event) {
+			String correlationId = event.getCorrelationId();
+			logger.warn("Rejecting chunk {}", correlationId);
+			this.reply(correlationId, "nack", event.getErrorMessage());
+		}
+		
+		private void reply(String correlationId, String status, String errorMessage) {
+			if (!hangingChunkCorrelationIds.contains(correlationId)) {
+				return;
+			}
+			
+			Map<String, Object> headers = new HashMap<>();
+			headers.put("x-correlation-id", correlationId);
+			headers.put("x-status", status);
+			if (errorMessage != null) {
+				headers.put("x-error", errorMessage);
+			}
+			AMQP.BasicProperties props = new AMQP.BasicProperties.Builder()
+			.headers(headers)
+			.build();
+			
+			String routingKey = "reply." + correlationId;
+			try {
+				/* Указываем в качестве первого параметра пустую строку, так как очереди не привязаны к какому-либо обменнику.
+				В качестве body нагрузки передаем пустой массив, так как сообщение не содержит как таковой полезной нагрузки */
+				amqpChannel.basicPublish(this.exchange, routingKey, props, new byte[0]);
+				hangingChunkCorrelationIds.remove(correlationId);
+			} catch (IOException e) {
+				logger.error(e.getMessage());
+			}
+		}
+		
+		private void handleDelivery(String consumerTag, Delivery delivery) {
+			if (delivery == null) {
+				return;
+			}
+			try {
+				AMQP.BasicProperties props = delivery.getProperties();
+				Map<String, Object> headers = props.getHeaders();
+				if (headers == null ||
+				!(headers.get("x-session-id") instanceof LongString sessionIdLong) ||
+				!(headers.get("x-correlation-id") instanceof LongString correlationIdLong) ||
+				!(headers.get("x-start-byte") instanceof Number) ||
+				!(headers.get("x-size") instanceof Number)) {
+					amqpChannel.basicNack(delivery.getEnvelope().getDeliveryTag(), false, false);
+					return;
+				}
+				
+				amqpChannel.basicAck(delivery.getEnvelope().getDeliveryTag(), false);
+				
+				String sessionId = toString(sessionIdLong);
+				String correlationId = toString(correlationIdLong);
+				int startByte = ((Number) headers.get("x-start-byte")).intValue();
+				int size = ((Number) headers.get("x-size")).intValue();
+				byte[] content = delivery.getBody();
+				
+				// Добавляем correlationId в список "висящих" (ожидающих) чанков
+				hangingChunkCorrelationIds.add(correlationId);
+				
+				// Создаем объект чанка
+				VideoChunk chunk = new VideoChunk(sessionId, startByte, size, content);
+				applicationEventPublisher.publishEvent(new ChunkReceivedEvent(correlationId, chunk));
+			} catch (IOException e) {
+				logger.error(e.getMessage());
+			}
+		}
+		
+		private void handleCancelDelivery(String consumerTag) {
+			logger.error("Cancelled delivery with consumer tag {}", consumerTag);
+		}
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={ApiService.java}]
+	package com.stombie.uploader_v4.service;
+	
+	import com.stombie.uploader_v4.model.api.FFlowBaseResponse;
+	import com.stombie.uploader_v4.model.api.FFlowCreateResponse;
+	import com.stombie.uploader_v4.model.api.FFlowFinishParams;
+	import org.springframework.beans.factory.annotation.Autowired;
+	import org.springframework.beans.factory.annotation.Value;
+	import org.springframework.http.MediaType;
+	import org.springframework.stereotype.Service;
+	import org.springframework.web.reactive.function.client.WebClient;
+	
+	@Service
+	public class ApiService {
+		private final WebClient webClient;
+		private final WebClient baseWebClient;
+		
+		@Autowired
+		public ApiService(@Value("${api.baseFFlowUrl}") String baseFFlowUrl,
+		WebClient.Builder webClientBuilder) {
+			webClient = webClientBuilder.build();
+			baseWebClient = webClientBuilder.baseUrl(baseFFlowUrl).build();
+		}
+		
+		/**
+		* Создание нового потока.
+		* @param uploadSessionId идентификатор сессии загрузки
+		*/
+		public FFlowCreateResponse createFlow(String uploadSessionId) {
+			String url = "/" + uploadSessionId;
+			try {
+				return baseWebClient.post()
+				.uri(url)
+				.retrieve()
+				.bodyToMono(FFlowCreateResponse.class)
+				.block();
+			} catch (Exception e) {
+				throw new RuntimeException("Error creating flow: " + e.getMessage(), e);
+			}
+		}
+		
+		/**
+		* Удаление потока видео
+		* @param deleteUrl - урл, по которому происходит удаление
+		*/
+		public FFlowBaseResponse deleteFlow(String deleteUrl) {
+			try {
+				return webClient.delete()
+				.uri(deleteUrl)
+				.retrieve()
+				.bodyToMono(FFlowBaseResponse.class)
+				.block();
+			} catch (Exception e) {
+				throw new RuntimeException("Error deleting flow: " + e.getMessage(), e);
+			}
+		}
+		
+		/**
+		* Завершение потока.
+		* @param finishUrl URL для завершения потока
+		* @param params параметры запроса для завершения потока
+		*/
+		public FFlowBaseResponse finishFlow(String finishUrl, FFlowFinishParams params) {
+			try {
+				return webClient.post()
+				.uri(finishUrl)
+				.bodyValue(params)
+				.retrieve()
+				.bodyToMono(FFlowBaseResponse.class)
+				.block();
+			} catch (Exception e) {
+				throw new RuntimeException("Error finishing flow: " + e.getMessage(), e);
+			}
+		}
+		
+		/**
+		* Отправка данных в поток.
+		* @param pushUrl URL для отправки данных
+		* @param data фактический чанк видео
+		*/
+		public FFlowBaseResponse pushToFlow(String pushUrl, byte[] data) {
+			try {
+				return webClient.post()
+				.uri(pushUrl)
+				.contentType(MediaType.APPLICATION_OCTET_STREAM)
+				.bodyValue(data)
+				.retrieve()
+				.bodyToMono(FFlowBaseResponse.class)
+				.block();
+			} catch (Exception e) {
+				throw new RuntimeException("Error pushing data to flow: " + e.getMessage(), e);
+			}
+		}
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={FFlowCacheService.java}]
+	package com.stombie.uploader_v4.service;
+	
+	import org.slf4j.Logger;
+	import org.slf4j.LoggerFactory;
+	import org.springframework.beans.factory.annotation.Autowired;
+	import org.springframework.data.redis.core.StringRedisTemplate;
+	import org.springframework.stereotype.Service;
+	
+	@Service
+	public class FFlowCacheService {
+		private static final Logger logger = LoggerFactory.getLogger(FFlowCacheService.class);
+		
+		private final StringRedisTemplate redisTemplate;
+		
+		@Autowired
+		public FFlowCacheService(StringRedisTemplate redisTemplate) {
+			this.redisTemplate = redisTemplate;
+		}
+		
+		void addFFlowUrl(String uploadSessionId, String fflowUrl) {
+			try {
+				redisTemplate.opsForValue().set(uploadSessionId, fflowUrl);
+			} catch (Throwable e) {
+				logger.error(e.getMessage(), e);
+				throw e;
+			}
+		}
+		
+		String getFFlowUrl(String uploadSessionId) {
+			try {
+				return redisTemplate.opsForValue().get(uploadSessionId);
+			} catch (Throwable e) {
+				logger.error(e.getMessage(), e);
+				throw e;
+			}
+		}
+		
+		String deleteFFlowUrl(String uploadSessionId) {
+			try {
+				return redisTemplate.opsForValue().getAndDelete(uploadSessionId);
+			} catch (Throwable e) {
+				logger.error(e.getMessage(), e);
+				throw e;
+			}
+		}
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={FFlowCoordinatorService.java}]
+	package com.stombie.uploader_v4.service;
+	
+	import com.stombie.uploader_v4.model.api.FFlowCreateResponse;
+	import com.stombie.uploader_v4.model.api.FFlowFinishParams;
+	import lombok.NonNull;
+	import org.slf4j.Logger;
+	import org.slf4j.LoggerFactory;
+	import org.springframework.beans.factory.annotation.Autowired;
+	import org.springframework.stereotype.Service;
+	
+	@Service
+	public class FFlowCoordinatorService {
+		private final Logger logger = LoggerFactory.getLogger(FFlowCoordinatorService.class);
+		
+		private final FFlowCacheService fflowCache;
+		private final ApiService api;
+		
+		@Autowired
+		public FFlowCoordinatorService(FFlowCacheService fflowCache, ApiService api) {
+			this.fflowCache = fflowCache;
+			this.api = api;
+		}
+		
+		public String ensureFlow(String uploadSessionId) {
+			String flowUrl = fflowCache.getFFlowUrl(uploadSessionId);
+			if (flowUrl == null || flowUrl.isEmpty()) {
+				FFlowCreateResponse response = api.createFlow(uploadSessionId);
+				String createdFlowUrl = response.getFlowUrl();
+				fflowCache.addFFlowUrl(uploadSessionId, createdFlowUrl);
+				flowUrl = createdFlowUrl;
+			}
+			return flowUrl;
+		}
+		
+		/**
+		* Отправляет данные в поток.
+		*
+		* @param uploadSessionId идентификатор сессии загрузки
+		* @param content         массив байт с данными
+		*/
+		public void pushToFlow(String uploadSessionId, byte[] content) {
+			String flowUrl = getFlowUrl(uploadSessionId);
+			api.pushToFlow(flowUrl + "/push", content);
+		}
+		
+		/**
+		* Удаляет поток.
+		*
+		* @param uploadSessionId идентификатор сессии загрузки
+		*/
+		public void deleteFlow(String uploadSessionId) {
+			logger.debug("deleteFlow: attempt {}", uploadSessionId);
+			try {
+				String flowUrl = fflowCache.getFFlowUrl(uploadSessionId);
+				if (flowUrl == null || flowUrl.isEmpty()) {
+					return;
+				}
+				api.deleteFlow(flowUrl + "/delete");
+				fflowCache.deleteFFlowUrl(uploadSessionId);
+			} catch (Exception e) {
+				logger.error("Unable to delete flow", e);
+			} finally {
+				logger.info("deleteFlow: {}", uploadSessionId);
+			}
+		}
+		
+		/**
+		* Завершает поток, отправляя соответствующие параметры и удаляя запись из кэша.
+		*
+		* @param uploadSessionId идентификатор сессии загрузки
+		* @param finishParams    параметры завершения потока
+		*/
+		public void finishFlow(String uploadSessionId, FFlowFinishParams finishParams) {
+			String flowUrl = getFlowUrl(uploadSessionId);
+			api.finishFlow(flowUrl + "/finish", finishParams);
+			fflowCache.deleteFFlowUrl(uploadSessionId);
+		}
+		
+		@NonNull
+		private String getFlowUrl(String uploadSessionId) {
+			String flowUrl = fflowCache.getFFlowUrl(uploadSessionId);
+			if (flowUrl == null || flowUrl.isEmpty()) {
+				throw new IllegalArgumentException("No flow associated with session " + uploadSessionId + " found");
+			}
+			return flowUrl;
+		}
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={VideoStatus.java}]
+	package com.stombie.uploader_v4.model;
+	
+	public enum VideoStatus {
+		CREATED,
+		UPLOADING,
+		DISTRIBUTED,
+		BLOCKED,
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={FlowStatus.java}]
+	package com.stombie.uploader_v4.model;
+	
+	public enum FlowStatus {
+		CREATED,
+		UPLOADING,
+		PROCESSING,
+		DISTRIBUTED,
+		HIDDEN,
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={UploadSession.java}]
+	package com.stombie.uploader_v4.entity;
+	
+	import jakarta.persistence.Column;
+	import jakarta.persistence.Entity;
+	import jakarta.persistence.FetchType;
+	import jakarta.persistence.GeneratedValue;
+	import jakarta.persistence.Id;
+	import jakarta.persistence.JoinColumn;
+	import jakarta.persistence.OneToOne;
+	import jakarta.persistence.Table;
+	import lombok.Getter;
+	import lombok.Setter;
+	
+	import java.util.UUID;
+	
+	@Entity
+	@Getter
+	@Setter
+	@Table(name = "upload_sessions")
+	public class UploadSession {
+		
+		@Id
+		@GeneratedValue(generator = "UUID")
+		@Column(updatable = false, nullable = false)
+		private UUID id;
+		
+		@Column(name = "total_bytes", nullable = false)
+		private Integer totalBytes;
+		
+		@Column(name = "uploaded_bytes", nullable = false)
+		private Integer uploadedBytes = 0;
+		
+		@OneToOne(fetch = FetchType.EAGER)
+		@JoinColumn(name = "flow_id", referencedColumnName = "id")
+		private Flow flow;
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Flow.java}]
+	package com.stombie.uploader_v4.entity;
+	
+	import com.stombie.uploader_v4.model.FlowStatus;
+	import jakarta.persistence.CascadeType;
+	import jakarta.persistence.Column;
+	import jakarta.persistence.Entity;
+	import jakarta.persistence.EnumType;
+	import jakarta.persistence.Enumerated;
+	import jakarta.persistence.FetchType;
+	import jakarta.persistence.GeneratedValue;
+	import jakarta.persistence.Id;
+	import jakarta.persistence.JoinColumn;
+	import jakarta.persistence.ManyToOne;
+	import jakarta.persistence.OneToOne;
+	import jakarta.persistence.Table;
+	import lombok.Getter;
+	import lombok.Setter;
+	import org.hibernate.annotations.CreationTimestamp;
+	
+	import java.time.Instant;
+	import java.util.UUID;
+	
+	@Entity
+	@Getter
+	@Setter
+	@Table(name = "flows")
+	public class Flow {
+		
+		@Id
+		@GeneratedValue(generator = "UUID")
+		@Column(updatable = false, nullable = false)
+		private UUID id;
+		
+		@Enumerated(EnumType.STRING)
+		@Column(nullable = false)
+		private FlowStatus status = FlowStatus.CREATED;
+		
+		@Column(name = "created_at", nullable = false, updatable = false)
+		@CreationTimestamp
+		private Instant createdAt;
+		
+		@Column(name = "uploaded_at")
+		private Instant uploadedAt;
+		
+		@ManyToOne(fetch = FetchType.EAGER)
+		@JoinColumn(name = "video_id", nullable = false)
+		private Video video;
+		
+		@OneToOne(mappedBy = "flow", cascade = CascadeType.ALL)
+		private UploadSession uploadSession;
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Video.java}]
+	package com.stombie.uploader_v4.entity;
+	
+	import com.stombie.uploader_v4.model.VideoStatus;
+	
+	import jakarta.persistence.CascadeType;
+	import jakarta.persistence.Column;
+	import jakarta.persistence.Entity;
+	import jakarta.persistence.EnumType;
+	import jakarta.persistence.Enumerated;
+	import jakarta.persistence.GeneratedValue;
+	import jakarta.persistence.Id;
+	import jakarta.persistence.OneToMany;
+	import jakarta.persistence.Table;
+	import lombok.Getter;
+	import lombok.Setter;
+	import org.hibernate.annotations.CreationTimestamp;
+	
+	import java.time.Instant;
+	import java.util.ArrayList;
+	import java.util.List;
+	import java.util.UUID;
+	
+	@Entity
+	@Getter
+	@Setter
+	@Table(name = "videos")
+	public class Video {
+		
+		@Id
+		@GeneratedValue(generator = "UUID")
+		@Column(updatable = false, nullable = false)
+		private UUID id;
+		
+		@Column(length = 255, nullable = false)
+		private String title;
+		
+		@Column(columnDefinition = "TEXT", nullable = false)
+		private String description;
+		
+		@Column(name = "created_at", nullable = false, updatable = false)
+		@CreationTimestamp
+		private Instant createdAt;
+		
+		@Column(name = "uploaded_at")
+		private Instant uploadedAt;
+		
+		@Enumerated(EnumType.STRING)
+		@Column(nullable = false)
+		private VideoStatus status = VideoStatus.CREATED;
+		
+		@OneToMany(mappedBy = "video", cascade = CascadeType.ALL, orphanRemoval = true)
+		private List<Flow> flows = new ArrayList<>();
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={VideoChunk.java}]
+	package com.stombie.uploader_v4.model;
+	
+	import lombok.Getter;
+	import lombok.Setter;
+	
+	@Getter
+	@Setter
+	public class VideoChunk {
+		private final String sessionId;
+		private final int startByte;
+		private final int size;
+		private final byte[] content;
+		
+		public VideoChunk(String sessionId, int startByte, int size, byte[] content) {
+			this.sessionId = sessionId;
+			this.startByte = startByte;
+			this.size = size;
+			this.content = content;
+		}
+		
+		@Override
+		public String toString() {
+			return "VideoChunk{" +
+				"sessionId='" + sessionId + '\'' +
+				", startByte=" + startByte +
+				", size=" + size +
+				", contentLength=" + (content != null ? content.length : 0) +
+				'}';
+		}
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={FFlowFinishParams.java}]
+	package com.stombie.uploader_v4.model.api;
+	
+	import lombok.Getter;
+	import lombok.Setter;
+	
+	@Getter
+	@Setter
+	public class FFlowFinishParams {
+		/**
+		* Путь, по которому будет сохранено итоговые манифесты и чанки видео на статике холдера
+		*/
+		private String savingPath;
+		
+		// Билдер делаю для удобства и с заделом на будущее
+		public static class Builder {
+			private final FFlowFinishParams params;
+			
+			public Builder() {
+				params = new FFlowFinishParams();
+			}
+			
+			public Builder setSavingPath(String savingPath) {
+				params.savingPath = savingPath;
+				return this;
+			}
+			
+			public FFlowFinishParams build() {
+				return params;
+			}
+		}
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={UploadSessionRepository.java}]
+	package com.stombie.uploader_v4.repository;
+	
+	import com.stombie.uploader_v4.entity.UploadSession;
+	import org.springframework.data.jpa.repository.JpaRepository;
+	import org.springframework.stereotype.Repository;
+	
+	import java.util.UUID;
+	
+	@Repository
+	public interface UploadSessionRepository extends JpaRepository<UploadSession, UUID> {
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={FlowRepository.java}]
+	package com.stombie.uploader_v4.repository;
+	
+	import com.stombie.uploader_v4.entity.Flow;
+	import org.springframework.data.jpa.repository.JpaRepository;
+	import org.springframework.stereotype.Repository;
+	
+	import java.util.List;
+	import java.util.UUID;
+	
+	@Repository
+	public interface FlowRepository extends JpaRepository<Flow, UUID> {
+		List<Flow> findByVideo_Id(UUID videoId);
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={VideoRepository.java}]
+	package com.stombie.uploader_v4.repository;
+	
+	import com.stombie.uploader_v4.entity.Video;
+	import org.springframework.data.jpa.repository.JpaRepository;
+	import org.springframework.stereotype.Repository;
+	
+	import java.util.UUID;
+	
+	@Repository
+	public interface VideoRepository extends JpaRepository<Video, UUID> {
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={AcceptChunkEvent.java}]
+	package com.stombie.uploader_v4.event;
+	
+	import lombok.Getter;
+	
+	@Getter
+	public class AcceptChunkEvent {
+		private final String correlationId;
+		
+		public AcceptChunkEvent(String correlationId) {
+			this.correlationId = correlationId;
+		}
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={RejectChunkEvent.java}]
+	package com.stombie.uploader_v4.event;
+	
+	import lombok.Getter;
+	
+	@Getter
+	public class RejectChunkEvent {
+		private final String correlationId;
+		private final String errorMessage;
+		
+		public RejectChunkEvent(String correlationId, String errorMessage) {
+			this.correlationId = correlationId;
+			this.errorMessage = errorMessage;
+		}
+	}
+\end{lstlisting}
+
+
+\begin{lstlisting}[caption={ChunkReceivedEvent.java}]
+	package com.stombie.uploader_v4.event;
+	
+	import com.stombie.uploader_v4.model.VideoChunk;
+	import lombok.Getter;
+	
+	@Getter
+	public class ChunkReceivedEvent {
+		private final String correlationId;
+		private final VideoChunk chunk;
+		
+		public ChunkReceivedEvent(String correlationId, VideoChunk chunk) {
+			this.correlationId = correlationId;
+			this.chunk = chunk;
+		}
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={UploaderManager.java}]
+	package com.stombie.uploader_v4.service;
+	
+	import com.stombie.uploader_v4.entity.Flow;
+	import com.stombie.uploader_v4.entity.UploadSession;
+	import com.stombie.uploader_v4.entity.Video;
+	import com.stombie.uploader_v4.event.AcceptChunkEvent;
+	import com.stombie.uploader_v4.event.ChunkReceivedEvent;
+	import com.stombie.uploader_v4.event.RejectChunkEvent;
+	import com.stombie.uploader_v4.model.FlowStatus;
+	import com.stombie.uploader_v4.model.VideoChunk;
+	import com.stombie.uploader_v4.model.VideoStatus;
+	import com.stombie.uploader_v4.model.api.FFlowFinishParams;
+	import com.stombie.uploader_v4.repository.FlowRepository;
+	import com.stombie.uploader_v4.repository.UploadSessionRepository;
+	import com.stombie.uploader_v4.repository.VideoRepository;
+	import org.slf4j.Logger;
+	import org.slf4j.LoggerFactory;
+	import org.springframework.beans.factory.annotation.Autowired;
+	import org.springframework.context.ApplicationEventPublisher;
+	import org.springframework.context.event.EventListener;
+	import org.springframework.stereotype.Service;
+	
+	import java.util.List;
+	import java.util.Optional;
+	import java.util.UUID;
+	
+	@Service
+	public class UploadManager {
+		private static final Logger logger = LoggerFactory.getLogger(UploadManager.class);
+		
+		private final ApplicationEventPublisher eventPublisher;
+		private final FlowRepository flowRepository;
+		private final UploadSessionRepository uploadSessionRepository;
+		private final VideoRepository videoRepository;
+		private final FFlowCoordinatorService fflowCoordinator;
+		
+		@Autowired
+		public UploadManager(ApplicationEventPublisher eventPublisher,
+		UploadSessionRepository uploadSessionRepository,
+		FlowRepository flowRepository,
+		VideoRepository videoRepository,
+		FFlowCoordinatorService fflowCoordinator) {
+			this.eventPublisher = eventPublisher;
+			this.flowRepository = flowRepository;
+			this.videoRepository = videoRepository;
+			this.uploadSessionRepository = uploadSessionRepository;
+			this.fflowCoordinator = fflowCoordinator;
+		}
+		
+		@EventListener
+		public void handleVideoChunk(ChunkReceivedEvent chunkReceivedEvent) {
+			String correlationId = chunkReceivedEvent.getCorrelationId();
+			VideoChunk chunk = chunkReceivedEvent.getChunk();
+			String sessionId = chunk.getSessionId();
+			int size = chunk.getSize();
+			int startByte = chunk.getStartByte();
+			byte[] content = chunk.getContent();
+			
+			logger.info("Handling video chunk {}:{}", correlationId, sessionId);
+			
+			Optional<UploadSession> uploadSessionCandidate = uploadSessionRepository.findById(UUID.fromString(sessionId));
+			logger.info("Do session search");
+			if (uploadSessionCandidate.isEmpty()) {
+				eventPublisher.publishEvent(new RejectChunkEvent(correlationId, String.format(
+				"No upload session found with id %s",
+				sessionId
+				)));
+				return;
+			}
+			
+			int updatedUploadedBytes = startByte + size;
+			UploadSession uploadSession = uploadSessionCandidate.get();
+			if (startByte != uploadSession.getUploadedBytes() ||
+			updatedUploadedBytes > uploadSession.getTotalBytes()) {
+				eventPublisher.publishEvent(new RejectChunkEvent(
+				correlationId,
+				"Bytes position mismatches"
+				));
+				return;
+			}
+			logger.info("Successfully validated chunk {}", correlationId);
+			
+			fflowCoordinator.ensureFlow(sessionId);
+			fflowCoordinator.pushToFlow(sessionId, content);
+			
+			uploadSession.setUploadedBytes(updatedUploadedBytes);
+			uploadSessionRepository.save(uploadSession);
+			if (updatedUploadedBytes == uploadSession.getTotalBytes()) {
+				Flow flow = uploadSession.getFlow();
+				Video video = flow.getVideo();
+				fflowCoordinator.finishFlow(
+				sessionId,
+				new FFlowFinishParams.Builder()
+				.setSavingPath("/" + video.getId() + "/" + flow.getId())
+				.build()
+				);
+				flow.setStatus(FlowStatus.DISTRIBUTED);
+				flowRepository.save(flow);
+				List<Flow> flows = flowRepository.findByVideo_Id(video.getId());
+				boolean allDistributed = flows.stream().allMatch(f -> f.getStatus() == FlowStatus.DISTRIBUTED);
+				if (allDistributed) {
+					video.setStatus(VideoStatus.DISTRIBUTED);
+					videoRepository.save(video);
+				}
+				uploadSessionRepository.delete(uploadSession);
+			}
+			
+			AcceptChunkEvent acceptEvent = new AcceptChunkEvent(correlationId);
+			eventPublisher.publishEvent(acceptEvent);
+		}
+	}
+\end{lstlisting}

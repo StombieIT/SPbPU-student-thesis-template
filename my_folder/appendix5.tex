@@ -1,0 +1,1030 @@
+\chapter{Программный код видеоплеера}
+
+\begin{lstlisting}[caption={config/slice.ts}]
+	import { createSlice, PayloadAction } from '@reduxjs/toolkit';
+	
+	export interface ConfigState {
+		isControlsHideable: boolean;
+	}
+	
+	const initialState: ConfigState = {
+		isControlsHideable: false,
+	};
+	
+	const configSlice = createSlice({
+		name: 'config',
+		initialState,
+		reducers: {
+			setIsControlsHideable(state, action: PayloadAction<boolean>) {
+				state.isControlsHideable = action.payload;
+			},     
+		},
+	});
+	
+	export const configReducer = configSlice.reducer;
+	export const { setIsControlsHideable } = configSlice.actions;
+\end{lstlisting}
+
+\begin{lstlisting}[caption={error/slice.ts}]
+	import { createSlice, PayloadAction } from '@reduxjs/toolkit';
+	
+	export interface ErrorState {
+		type: ErrorType | null;
+	}
+	
+	const initialState: ErrorState = {
+		type: null,
+	};
+	
+	const errorSlice = createSlice({
+		name: 'error',
+		initialState,
+		reducers: {
+			setErrorType(state, action: PayloadAction<ErrorType | null>) {
+				state.type = action.payload;
+			},
+		},
+	});
+	
+	export const { setErrorType } = errorSlice.actions;
+	export const errorReducer = errorSlice.reducer;
+\end{lstlisting}
+
+\begin{lstlisting}[caption={player/slice.ts}]
+	import { createAction, createSlice, PayloadAction } from '@reduxjs/toolkit';
+	
+	interface PlayerState {
+		status: PlayerStatus;
+		currentTime: number;
+		duration: number;
+		isFullScreenOpened: boolean;
+		isMuted: boolean;
+		volume: number;
+	}
+	
+	const initialState: PlayerState = {
+		status: PlayerStatus.PAUSED,
+		currentTime: 0,
+		duration: 0,
+		volume: 50,
+		isFullScreenOpened: false,
+		isMuted: false,
+	};
+	
+	const playerSlice = createSlice({
+		name: 'player',
+		initialState,
+		reducers: {
+			setStatus(state, action: PayloadAction<PlayerStatus>) {
+				state.status = action.payload;
+			},
+			
+			setCurrentTime(state, action: PayloadAction<number>) {
+				state.currentTime = action.payload;
+			},
+			
+			setDuration(state, action: PayloadAction<number>) {
+				state.duration = action.payload;
+			},
+			
+			setVolume(state, action: PayloadAction<number>) {
+				state.volume = action.payload;
+			},
+			
+			setIsFullScreenOpened(state, action: PayloadAction<boolean>) {
+				state.isFullScreenOpened = action.payload;
+			},
+			
+			setIsMuted(state, action: PayloadAction<boolean>) {
+				state.isMuted = action.payload;
+			},
+		},
+	});
+	
+	export const playerReducer = playerSlice.reducer;
+	export const {
+		setStatus, setCurrentTime, setDuration,
+		setVolume, setIsFullScreenOpened, setIsMuted,
+	} = playerSlice.actions;
+	export const setTime = createAction<SetTimePayload>('player/setTime');
+\end{lstlisting}
+
+\begin{lstlisting}[caption={video/slice.ts}]
+	import { createSlice, PayloadAction } from '@reduxjs/toolkit';
+	
+	export interface VideoState extends Omit<DistributedVideo, 'id' | 'uploadedAt'> {
+		id: string | null;
+		mainFlowId: string | null;
+		flowIds: string[];
+		flowById: Record<string, DistributedFlow>;
+		uploadedAt: number | null;
+	}
+	
+	const initialState: VideoState = {
+		id: null,
+		mainFlowId: null,
+		title: '',
+		description: '',
+		flowIds: [],
+		flowById: {},
+		uploadedAt: null,
+	};
+	
+	const videoSlice = createSlice({
+		name: 'video',
+		initialState,
+		reducers: {
+			updateFlows(state, { payload }: PayloadAction<DistributedFlow | DistributedFlow[]>) {
+				const flows = Array.isArray(payload) ? payload : [payload];
+				
+				flows.forEach(flow => {
+					if (!state.flowIds.includes(flow.id)) {
+						state.flowIds.push(flow.id);
+					}
+					
+					if (!state.flowById[flow.id]) {
+						const existingFlow = state.flowById[flow.id];
+						state.flowById[flow.id] = {
+							...existingFlow,
+							...flow,
+						};
+					} else {
+						state.flowById[flow.id] = flow;
+					}
+				});
+			},
+			
+			setTitle(state, action: PayloadAction<string>) {
+				state.title = action.payload;
+			},
+			
+			setDescription(state, action: PayloadAction<string>) {
+				state.description = action.payload;
+			},
+			
+			setId(state, action: PayloadAction<string | null>) {
+				state.id = action.payload;
+			},
+			
+			setUploadedAt(state, action: PayloadAction<number | null>) {
+				state.uploadedAt = action.payload;
+			},
+			
+			setMainFlowId(state, action: PayloadAction<string | null>) {
+				state.mainFlowId = action.payload;
+			},
+		},
+	});
+	
+	export const { updateFlows, setTitle, setDescription, setId, setUploadedAt, setMainFlowId } = videoSlice.actions;
+	export const videoReducer = videoSlice.reducer;
+\end{lstlisting}
+
+\begin{lstlisting}[caption={video/selectors.ts}]
+	export const selectFlowById = (flowId: string) => (state: RootState) =>
+	state.video.flowById[flowId];
+	
+	export const selectFlowIds = (state: RootState) => state.video.flowIds;
+	
+	export const selectFlows = (state: RootState): DistributedFlow[] => {
+		const flowIds = state.video.flowIds;
+		
+		return flowIds.reduce((flows, flowId) => {
+			const flow = state.video.flowById[flowId];
+			if (!flow) {
+				return flows;
+			}
+			
+			flows.push(flow);
+			return flows;
+		}, [] as DistributedFlow[]);
+	};
+	
+	export const selectMainFlowId = (state: RootState) =>
+	state.video.mainFlowId; 
+\end{lstlisting}
+
+\begin{lstlisting}[caption={store.ts}]
+	import createSagaMiddleware from 'redux-saga';
+	
+	const sagaMiddleware = createSagaMiddleware();
+	
+	export const store = configureStore({
+		reducer: {
+			video: videoReducer,
+			error: errorReducer,
+			player: playerReducer,
+			config: configReducer,
+		},
+		middleware: (getDefaultMiddleware) =>
+		getDefaultMiddleware({
+			thunk: false,
+			serializableCheck: false,
+		}).concat(sagaMiddleware),
+	});
+	
+	sagaMiddleware.run(rootSaga);
+	
+	window.store = store;
+\end{lstlisting}
+
+\begin{lstlisting}[caption={player/sagas.ts}]
+	import { all, put, takeEvery } from 'redux-saga/effects';
+	import { PayloadAction } from '@reduxjs/toolkit';
+	
+	function* setTimeSaga(action: PayloadAction<SetTimePayload>) {
+		const { payload: { currentTime, duration } } = action;    
+		
+		yield all([
+			put(setCurrentTime(currentTime)),
+			put(setDuration(duration)),
+		]);
+	}
+	
+	export function* playerRootSaga() {
+		yield all([
+			takeEvery(setTime.type, setTimeSaga),
+		]);
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={shared/sagas.ts}]
+	import { all, call, fork, put } from 'redux-saga/effects';
+	import { AxiosResponse } from 'axios';
+	
+	function* fillContent() {
+		try {
+			const videoId = window.location.pathname.substring(1);
+			
+			const { data: { payload } }: AxiosResponse<Gateway.Response.State> =
+			yield call(api.get, `/state/${videoId}`);
+			const { id, title, description, flows, status, uploadedAt } = payload;
+			
+			if (status !== 'DISTRIBUTED') {
+				yield put(setErrorType(ErrorType.VIDEO_NOT_DISTRIBUTED));
+				return;
+			}
+			
+			if (!flows.length) {
+				yield put(setErrorType(ErrorType.NO_FLOWS));
+				return;
+			}
+			
+			const mainFlowId = flows[0].id;
+			yield all([
+			put(setId(id)),
+			put(setTitle(title)),
+			put(setDescription(description)),
+			put(updateFlows(flows as DistributedFlow[])),
+			put(setUploadedAt(uploadedAt || null)),
+			]);
+			yield put(setMainFlowId(mainFlowId));
+		} catch (error) {
+			yield put(setErrorType(ErrorType.UNKNOWN));
+		}
+	}
+	
+	export function* sharedRootSaga() {
+		yield all([
+		fork(fillContent),
+		fork(rootPlayerSagas),
+		]);
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={shared/player-sagas.ts}]
+	import { all, call, fork, put, select, take, takeEvery, takeLatest } from 'redux-saga/effects';
+	import { PayloadAction } from '@reduxjs/toolkit';
+	import Hls from 'hls.js';
+	import dashjs from 'dashjs';
+	
+	function* createFlow(flow: DistributedFlow) {
+		const { distributionUrls } = flow;
+		const { hls, dash } = distributionUrls;
+		
+		const video = document.createElement('video');
+		video.playsInline = true;
+		video.dataset.id = flow.id;
+		
+		if (Hls.isSupported() && hls) {
+			const hlsPlayer = new Hls();
+			hlsPlayer.loadSource(hls);
+			hlsPlayer.attachMedia(video);
+			
+			yield call([videoManager, videoManager.addVideo], flow.id, hlsPlayer);
+		} else if (dash) {
+			const player = dashjs.MediaPlayer().create();
+			player.initialize(video, dash, false);
+			yield call([videoManager, videoManager.addVideo], flow.id, player);
+		} else {
+			console.warn(`No supported stream format found for flow ${flow.id}`);
+		}
+	}
+	
+	function* handleUpdateFlows({ payload }: PayloadAction<DistributedFlow | DistributedFlow[]>) {
+		const flows = Array.isArray(payload) ? payload : [payload];
+		
+		const newFlows = flows.filter(({ id }) => !videoManager.isVideoExistsById(id));
+		
+		yield all(
+		newFlows.map((flow) => call(createFlow, flow))
+		);
+	}
+	
+	function* getFlows() {
+		const flowIds: string[] = yield select(selectFlowIds);
+		
+		return flowIds.reduce((flows, flowId) => {
+			const flow = videoManager.getVideoById(flowId);
+			if (flow) {
+				flows.push(flow);
+			}
+			return flows;
+		}, [] as dashjs.MediaPlayerClass[]);
+	}
+	
+	function* getVideos() {
+		const flows: dashjs.MediaPlayerClass[] = yield call(getFlows);
+		const videos = flows.map(flow => flow.getVideoElement())
+		return videos;
+	}
+	
+	function* getMainVideo() {
+		const mainFlowId: string = yield select(selectMainFlowId);
+		const mainFlow: dashjs.MediaPlayerClass = yield call([videoManager, videoManager.getVideoById],
+		mainFlowId
+		);
+		const video = mainFlow.getVideoElement();
+		return video;
+	}
+	
+	function* playSaga() {
+		const videos: HTMLVideoElement[] = yield call(getVideos);
+		
+		yield all(
+		videos.map((video) => video.play())
+		);
+		yield put(setStatus(PlayerStatus.PLAYING));
+	}
+	
+	function* pauseSaga() {
+		const videos: HTMLVideoElement[] = yield call(getVideos);
+		
+		yield all(
+		videos.map((video) => video.pause())
+		);
+		yield put(setStatus(PlayerStatus.PAUSED));
+	}
+	
+	function* reloadSaga() {
+		const videos: HTMLVideoElement[] = yield call(getVideos);
+		
+		yield all(
+		videos.map((video) => call(doSeek, video, 0)),
+		);
+		
+		yield call(playSaga);
+	}
+	
+	function* seekSaga(action: PayloadAction<number>) {
+		const videos: HTMLVideoElement[] = yield call(getVideos);
+		
+		yield all(
+		videos.map((video) => call(doSeek, video, action.payload)),
+		);
+	}
+	
+	
+	function* togglePlaySaga() {
+		const status: PlayerStatus = yield select(selectPlayerStatus);
+		switch (status) {
+			case PlayerStatus.PLAYING:
+			yield put(pause());
+			return;
+			case PlayerStatus.PAUSED:
+			yield put(play());
+			return;
+			case PlayerStatus.FINISHED:
+			yield put(reload());
+			return;
+		}
+	}
+	
+	function* toggleSoundSaga() {
+		const isMuted: boolean = yield select(selectIsMuted);
+		yield put(setIsMuted(!isMuted));
+		if (isMuted) {
+			const volume: number = yield select(selectVolume);
+			if (!volume) {
+				yield put(setVolume(50));
+			}
+		}
+	}
+	
+	function* updateIsMutedSaga(action: PayloadAction<boolean>) {
+		const mainVideo: HTMLVideoElement = yield call(getMainVideo);
+		mainVideo.muted = action.payload;
+	}
+	
+	function* updateVolumeSaga(action: PayloadAction<number>) {
+		const mainVideo: HTMLVideoElement = yield call(getMainVideo);
+		mainVideo.volume = getVolumeRatio(action.payload);
+	}
+	
+	function* handleUpdateMainFlow(prevFlowId: string | null, currentFlowId: string | null) {
+		const videos: HTMLVideoElement[] = yield call(getVideos);
+		const isMuted: boolean = yield select(selectIsMuted);
+		const volume: number = yield select(selectVolumeRatio);
+		videos.forEach((video) => {
+			const videoId = video.dataset.id;
+			if (prevFlowId === videoId) {
+				video.removeEventListener('timeupdate', onTimeupdate);
+				video.removeEventListener('ended', onEnded);
+				video.muted = true;
+			}
+			if (currentFlowId === videoId) {
+				video.addEventListener('timeupdate', onTimeupdate);
+				video.addEventListener('ended', onEnded);
+				video.muted = isMuted;
+				video.volume = volume;
+			} else {
+				video.muted = true;
+			}
+		});
+	}
+	
+	function* uploadMainFlowWatcher() {
+		let prevFlowId: string | null = null;
+		while (true) {
+			const { payload: flowId }: PayloadAction<string | null> = yield take(setMainFlowId.type);
+			yield call(handleUpdateMainFlow, prevFlowId, flowId);
+			prevFlowId = flowId;
+		}
+	}
+	
+	export function* rootPlayerSagas() {
+		yield all([
+			fork(uploadMainFlowWatcher),
+			takeLatest(updateFlows.type, handleUpdateFlows),
+			takeLatest(play.type, playSaga),
+			takeLatest(pause.type, pauseSaga),
+			takeLatest(reload.type, reloadSaga),
+			takeLatest(seek.type, seekSaga),
+			takeLatest(togglePlay.type, togglePlaySaga),
+			takeLatest(toggleSound.type, toggleSoundSaga),
+			takeEvery(setVolume.type, updateVolumeSaga),
+			takeEvery(setIsMuted.type, updateIsMutedSaga),
+		]);
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={App.tsx}]
+	import { FunctionComponent, ReactNode, useCallback, useEffect, useRef, useState } from 'react';
+	import { useDispatch, useSelector } from 'react-redux';
+	import cn from 'classnames';
+	
+	const MANIFEST_PATH = '/testing/manifest.mpd';
+	
+	export const App: FunctionComponent = () => {
+		const status = useSelector(selectPlayerStatus);
+		const flows = useSelector(selectFlows);
+		const mainFlowId = useSelector(selectMainFlowId);
+		const isControlsHideable = useSelector(selectIsControlsHideable);
+		const isFullScreenOpened = useSelector(selectIsFullScreenOpened);
+		const dispatch = useDispatch();
+		
+		const containerRef = useRef<HTMLDivElement>(null);
+		const [lastWasTouched, setLastWasTouched] = useState<number>(0);
+		const [isControlsVisible, setIsControlsVisible] = useState<boolean>(true);
+		const [isFullScreenLoading, setIsFullScreenLoading] = useState<boolean>(false);
+		
+		useEffect(() => {
+			if (lastWasTouched) {
+				setIsControlsVisible(true);
+				const timer = setTimeout(() => setIsControlsVisible(false), 3000);
+				
+				return () => {
+					clearTimeout(timer);
+				};
+			}
+		}, [lastWasTouched]);
+		
+		useEffect(() => {
+			if (status === PlayerStatus.FINISHED) {
+				setIsControlsVisible(true);
+			}
+		}, [status]);
+		
+		const onTimeUpdate = useCallback((currentTime: number, duration: number) => {
+			dispatch(setTime({
+				currentTime,
+				duration,
+			}));
+		}, []);
+		
+		const onEnded = useCallback(() => {
+			dispatch(setStatus(PlayerStatus.FINISHED));
+		}, []);
+		
+		const isLoading = !flows.length || !mainFlowId;
+		
+		const slots = (() => {
+			if (isLoading) {
+				return;
+			}
+			
+			const regularSlots = [] as ReactNode[];
+			let mainSlot: ReactNode;
+			
+			for (const flow of flows) {
+				if (flow.id === mainFlowId) {
+					mainSlot = (
+					<Slot
+					className={css.mainSlot}
+					flowId={flow.id}
+					onClick={() => dispatch(togglePlay())}
+					/>
+					);
+					continue;
+				}
+				
+				regularSlots.push(
+				<div className={css.slotWrapper}>
+				<button
+				type="button"
+				className={css.button}
+				onClick={() => dispatch(setMainFlowId(flow.id))}
+				>
+				</button>
+				<Slot
+				key={flow.id}
+				flowId={flow.id}
+				className={css.slot}
+				/>
+				</div>
+				);
+			}
+			
+			if (!mainSlot) {
+				return;
+			}
+			
+			
+			return (
+			<>
+			{Boolean(regularSlots.length) && (
+				<div className={css.regularSlots}>
+				{regularSlots}
+				</div>
+				)}
+			{mainSlot}
+			</>
+			);
+		})();
+		
+		useEffect(() => {
+			const onFullscreenChange = () => {
+				dispatch(setIsFullScreenOpened(Boolean(document.fullscreenElement)));
+			};     
+			
+			document.addEventListener('fullscreenchange', onFullscreenChange);
+			
+			return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
+		}, []);
+		
+		const controlsWrapperClasses = cn(
+		css.controlsWrapper,
+		{
+			[css.__hidden]: !isControlsVisible && isControlsHideable,
+		}
+		);
+		
+		const onClick = useCallback((evt: React.MouseEvent<HTMLDivElement>) => {
+			setLastWasTouched(Date.now());
+		}, [])
+		
+		const onMouseMove = useCallback(() => {
+			setLastWasTouched((lastWasTouched) => lastWasTouched ? Date.now() : lastWasTouched);
+		}, []);
+		
+		const onFullScreenChangeAttempt = useCallback(() => {
+			setIsFullScreenLoading(true);
+			if (!isFullScreenLoading) {
+				let action: Promise<void>;
+				if (isFullScreenOpened) {
+					action = document.exitFullscreen();
+				} else {
+					action = containerRef.current!.requestFullscreen();
+				}
+				action.finally(() => setIsFullScreenLoading(false));
+			}
+		}, [isFullScreenOpened, isFullScreenLoading]);
+		
+		return (
+			<main
+				ref={containerRef}
+				className={css.container}
+				onClick={onClick}
+				onMouseMove={onMouseMove}
+			>
+				{slots}
+				<footer className={controlsWrapperClasses}>
+					<Controls onFullScreenChangeAttempt={onFullScreenChangeAttempt} />
+				</footer>
+			</main>
+		);
+	};
+\end{lstlisting}
+
+\begin{lstlisting}[caption={config.ts}]
+	import { FC, ReactNode, useMemo } from 'react';
+	import { useDispatch, useSelector } from 'react-redux';
+	
+	interface ButtonOptions {
+		icon?: ReactNode;
+		onClick?: () => void;
+	}
+	
+	export interface ControlsProps {
+		onFullScreenChangeAttempt?: () => void;
+	}
+	
+	export const Controls: FC<ControlsProps> = ({ onFullScreenChangeAttempt: onFullScreenChange }) => {
+		const status = useSelector(selectPlayerStatus);
+		const isFullScreenOpened = useSelector(selectIsFullScreenOpened);
+		const dispatch = useDispatch();
+		
+		const { onClick, icon: mainIcon } = useMemo<ButtonOptions>(() => {
+			switch (status) {
+				case PlayerStatus.PAUSED:
+				return {
+					icon: <PlayIcon />,
+					onClick: () => dispatch(play()),
+				};
+				case PlayerStatus.FINISHED:
+				return {
+					icon: <ReloadIcon />,
+					onClick: () => dispatch(reload()),
+				};
+				default:
+				return {
+					icon: <PauseIcon />,
+					onClick: () => dispatch(pause()),
+				};
+			}
+		}, [status]);
+		
+		return (
+			<div className={css.wrapper}>
+				<TimeRange />
+				<div className={css.controlsWrapper}>
+					<div className={css.leftPanel}>
+						<button
+							type="button"
+							className={css.button}
+							onClick={onClick}
+						>
+							{mainIcon}
+						</button>
+						<TimeIndicator />
+						<VolumeControl />
+					</div>
+					<div className={css.rightPanel}>
+						<button
+							type="button"
+							className={css.button}
+							onClick={onFullScreenChange}
+						>
+						{isFullScreenOpened ? (
+							<FullscreenOffIcon />
+						) : (
+							<FullscreenOnIcon />
+						)}
+						</button>
+					</div>
+				</div>
+			</div>
+		);
+	};
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Range.tsx}]
+	import { FC, HTMLAttributes, useLayoutEffect, useRef } from 'react';
+	import cn from 'classnames';
+	
+	export interface RangeProps
+	extends Pick<HTMLAttributes<HTMLDivElement>,
+	'onMouseLeave' |
+	'onMouseDown' |
+	'onMouseEnter' |
+	'className'
+	> {
+		fact?: number;
+		desirable?: number;
+		onMouseMove?: (evt: MouseEvent, element: HTMLElement) => void;
+		onMouseUp?: (evt: MouseEvent, element: HTMLElement) => void;
+	}
+	
+	export const Range: FC<RangeProps> = ({
+		fact = 0,
+		desirable = 0,
+		onMouseMove,
+		onMouseEnter,
+		onMouseLeave,
+		onMouseDown,
+		onMouseUp,
+		className,
+	}) => {
+		const rangeRef = useRef<HTMLDivElement>(null);    
+		
+		const rangeStyles: Record<string, string> = {
+			'--fact-progress': `${fact}%`,
+			'--desirable-progress': `${desirable}%`,
+		};
+		
+		const rangeClasses = cn(
+		css.range,
+		className,
+		);
+		
+		useLayoutEffect(() => {
+			if (onMouseUp || onMouseMove) {
+				function mouseMoveHandler(evt: MouseEvent) {
+					onMouseMove?.(evt, rangeRef.current!);
+				}
+				
+				function mouseUpHandler(evt: MouseEvent) {
+					onMouseUp?.(evt, rangeRef.current!);
+					dispose();
+				}
+				
+				function dispose() {
+					window.removeEventListener('mousemove', mouseMoveHandler);
+					if (onMouseMove) {
+						window.removeEventListener('mouseup', mouseUpHandler);
+					}
+				}
+				
+				window.addEventListener('mouseup', mouseUpHandler);
+				if (onMouseMove) {
+					window.addEventListener('mousemove', mouseMoveHandler);
+				}
+				
+				return dispose;
+			}
+		}, [onMouseUp, onMouseMove]);
+		
+		return (
+			<div
+				className={rangeClasses}
+				style={rangeStyles}
+				onMouseLeave={onMouseLeave}
+				onMouseDown={onMouseDown}
+				onMouseEnter={onMouseEnter}
+				ref={rangeRef}
+			>
+				<div className={css.line}>
+					<div className={css.barWrapper}></div>
+					<div className={css.thumb}></div>
+				</div>
+			</div>
+		);
+	};
+\end{lstlisting}
+
+\begin{lstlisting}[caption={video-manager.tsx}]
+	import dashjs from 'dashjs';
+	import Hls from 'hls.js'
+	import React, { FC, useEffect, useState, PropsWithChildren, useContext } from 'react'
+	import { v4 as uuid } from 'uuid';
+	
+	class VideoManager extends EventTarget {
+		private readonly map = new Map<string, dashjs.MediaPlayerClass>();
+		
+		constructor() {
+			super();
+		}
+		
+		addVideo(id: string, video: dashjs.MediaPlayerClass | Hls) {
+			this.map.set(id, video);
+			this.emitUpdate();
+		}
+		
+		removeVideoById(id: string) {
+			this.map.delete(id);
+			this.emitUpdate();
+		}
+		
+		getVideoById(id: string) {
+			return this.map.get(id);
+		}
+		
+		transferVideo(fromId: string, toId: string) {
+			const video = this.map.get(fromId);
+			if (!video) {
+				return;
+			}
+			this.map.set(toId, video);
+			this.map.delete(fromId);
+			this.emitUpdate();
+		}
+		
+		isVideoExistsById(id: string) {
+			return this.map.has(id);
+		}
+		
+		private emitUpdate() {
+			this.dispatchEvent(new CustomEvent('update'));
+		}
+	}
+	
+	export const videoManager = new VideoManager();
+	
+	const VideoManagerContext = React.createContext(videoManager);
+	
+	export const VideoManagerProvider: FC<PropsWithChildren> = ({ children }) =>
+	<VideoManagerContext.Provider value={videoManager}>
+	{children}
+	</VideoManagerContext.Provider>
+	
+	const INITIAL_REVISION = 'zero-revision'
+	
+	export const useVideoManager = () => {
+		const manager = useContext(VideoManagerContext);
+		const [, setRevision] = useState<string>(INITIAL_REVISION);
+		
+		useEffect(() => {
+			const onUpdate = () => {
+				setRevision(uuid());
+			};        
+			
+			manager.addEventListener('update', onUpdate);
+			
+			return () => {
+				manager.removeEventListener('update', onUpdate);
+			};
+		}, []);
+		
+		return manager;
+	};
+	
+	export const useVideo = (id: string) => {
+		const manager = useVideoManager();
+		
+		return manager.getVideoById(id);
+	};
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Slot.tsx}]
+	import { FC, useLayoutEffect, useRef, HTMLAttributes } from 'react';
+	import cn from 'classnames';
+	
+	export interface SlotProps
+	extends Pick<HTMLAttributes<HTMLDivElement>, 'className' | 'onClick'> {
+		flowId: string;
+	}
+	
+	export const Slot: FC<SlotProps> = ({ flowId, className, ...props }) => {
+		const playerRef = useRef<HTMLDivElement>(null);
+		const video = useVideo(flowId);
+		
+		useLayoutEffect(() => {
+			if (playerRef.current) {
+				playerRef.current.appendChild(video!.getVideoElement());
+				
+				return () => {
+					playerRef.current?.removeChild(video!.getVideoElement());
+				};
+			}
+		}, [video]);
+		
+		const slotClasses = cn(
+		css.slot,
+		className,
+		);
+		
+		return (
+			<div {...props} className={slotClasses} ref={playerRef}>
+			</div>
+		);
+	};
+\end{lstlisting}
+
+\begin{lstlisting}[caption={TimeIndicator.tsx}]
+	import { FC, useMemo } from 'react';
+	import { useSelector } from 'react-redux';
+	
+	export const TimeIndicator: FC = () => {
+		const currentTime = useSelector(selectPlayerTime);
+		const duration = useSelector(selectDuration);
+		
+		const durationTime = useMemo(
+		() => secondsToTime(duration),
+		[duration]
+		);
+		
+		return (
+			<div className={css.time}>
+				{secondsToTime(currentTime)} / {durationTime}
+			</div>
+		);
+	};
+\end{lstlisting}
+
+\begin{lstlisting}[caption={VolumeControl.tsx}]
+	import { FC, HTMLAttributes, useCallback, useState } from 'react';
+	import { useDispatch, useSelector } from 'react-redux';
+	import cn from 'classnames';
+	
+	export interface VolumeControlProps
+	extends Pick<HTMLAttributes<HTMLDivElement>, 'className'> {
+	}
+	
+	export const VolumeControl: FC<VolumeControlProps> = ({
+		className,
+	}) => {
+		const isMuted = useSelector(selectIsMuted);
+		const volume = useSelector(selectVolume);
+		const dispatch = useDispatch();
+		
+		const [isMouseDown, setIsMouseDown] = useState<boolean>(false);
+		const [isMouseEnter, setIsMouseEnter] = useState<boolean>(false);
+		
+		const icon = (() => {
+			if (isMuted) {
+				return <MutedIcon />;
+			}
+			if (!volume) {
+				return <NoneIcon />;
+			}
+			if (volume < 50) {
+				return <LowIcon />;
+			}
+			return <HighIcon />;
+		})();
+		
+		const controlClasses = cn(
+		css.controlWrapper,
+		className,
+		);
+		
+		const onSoundClick = useCallback(() => {
+			dispatch(toggleSound());
+		}, []);
+		
+		const onMouseMove = useCallback((evt: MouseEvent, element: HTMLElement) => {
+			if (isMouseDown) {
+				const progress = Math.max(
+				0,
+				Math.min(Math.round(getProgressByEvent(evt, element)), 100),
+				)
+				dispatch(setVolume(progress));
+			}
+		}, [isMouseDown]);
+		
+		const onMouseUp = useCallback((evt: MouseEvent, element: HTMLElement) => {
+			if (isMouseDown || isMouseEnter) {
+				const progress = Math.max(
+				0,
+				Math.min(Math.round(getProgressByEvent(evt, element)), 100),
+				);
+				dispatch(setVolume(progress));
+			}
+			setIsMouseDown(false);
+		}, [isMouseEnter, isMouseDown]);
+		
+		const onMouseDown = useCallback(() => {
+			setIsMouseDown(true);
+		}, []);
+		
+		const onMouseEnter = useCallback(() => {
+			setIsMouseEnter(true);
+		}, []);
+		
+		const onMouseLeave = useCallback(() => {
+			setIsMouseEnter(false);
+		}, []);
+		
+		return (
+			<div className={controlClasses}>
+				<button
+					type="button"
+					className={css.button}
+					onClick={onSoundClick}
+				>
+					{icon}
+				</button>
+				<Range
+					className={css.range}
+					fact={volume}
+					onMouseDown={onMouseDown}
+					onMouseUp={onMouseUp}
+					onMouseMove={onMouseMove}
+					onMouseEnter={onMouseEnter}
+					onMouseLeave={onMouseLeave}
+				/>
+			</div>
+		);
+	};
+\end{lstlisting}
+

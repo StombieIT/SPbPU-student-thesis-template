@@ -1,0 +1,1135 @@
+\chapter{Программный код редактора синхронизации}
+
+\begin{lstlisting}[caption={config/slice.ts}]
+	import { createAction, createSlice, PayloadAction } from '@reduxjs/toolkit';
+	
+	export type AuthState = OAuthTokens | null;
+	
+	const initialState = null as AuthState;
+	
+	const authSlice = createSlice({
+		name: 'auth',
+		initialState,
+		reducers: {
+			updateTokens: (state, action: PayloadAction<UpdateTokensPayload>) => {
+				const { refreshToken, accessToken } = action.payload
+				if (refreshToken && accessToken && !state) {
+					return { refreshToken, accessToken };
+				}
+				if (state) {
+					state.accessToken = accessToken ?? state.accessToken;
+					state.refreshToken = refreshToken ?? state.refreshToken;
+				}
+			},
+			
+			reset: () => {
+				return null;
+			}
+		},
+	});
+	
+	export const login = createAction<AuthCredentials>('auth/login');
+	export const logout = createAction('auth/logout');
+	export const register = createAction<AuthCredentials>('auth/register');
+	export const { updateTokens, reset } = authSlice.actions;
+	export const authReducer = authSlice.reducer;
+\end{lstlisting}
+
+\begin{lstlisting}[caption={distribution/slice.ts}]
+	import { createSlice, PayloadAction } from '@reduxjs/toolkit';
+	
+	interface DistributionState {
+		playerUrl: string;
+	}
+	
+	const initialState: DistributionState = {
+		playerUrl: '',
+	};
+	
+	const distributionSlice = createSlice({
+		name: 'distribution',
+		initialState,
+		reducers: {
+			setPlayerUrl(state, action: PayloadAction<string>) {
+				state.playerUrl = action.payload;
+			},
+		},
+	});
+	
+	export const { setPlayerUrl } = distributionSlice.actions;
+	export const distributionReducer = distributionSlice.reducer;
+\end{lstlisting}
+
+\begin{lstlisting}[caption={flow-candidates/slice.ts}]
+	import { createAction, createSlice, PayloadAction } from '@reduxjs/toolkit';
+	
+	const initialState = [] as string[];
+	
+	const flowCandidatesSlice = createSlice({
+		name: 'flowCandidates',
+		initialState,
+		reducers: {
+			addCandidate(state, action: PayloadAction<string>) {
+				state.push(action.payload);
+			},
+			
+			deleteCandidateById(state, action: PayloadAction<string>) {
+				return state.filter(candidateId => candidateId !== action.payload);
+			},
+		},
+	});
+	
+	export const addCandidateVideoAction = createAction<AddCandidateVideoPayload>('flowCandidates/addCandidateVideoAction');
+	export const deleteCandidateByIdAction = createAction<string>('flowCandidates/deleteCandidateByIdAction');
+	export const { addCandidate, deleteCandidateById: deleteFlowById } = flowCandidatesSlice.actions;
+	export const flowCandidatesReducer = flowCandidatesSlice.reducer;
+\end{lstlisting}
+
+\begin{lstlisting}[caption={stage/slice.ts}]
+	import { createSlice, PayloadAction } from '@reduxjs/toolkit';
+	
+	const initialState = Stage.SYNCHRONIZING;
+	
+	const stageSlice = createSlice({
+		name: 'stage',
+		initialState,
+		reducers: {
+			changeStage: (state, action: PayloadAction<Stage>) => {
+				return action.payload;
+			},
+		},
+	});
+	
+	export const { changeStage } = stageSlice.actions;
+	export const stageReducer = stageSlice.reducer;
+\end{lstlisting}
+
+\begin{lstlisting}[caption={video/slice.ts}]
+	import { createSlice, PayloadAction } from '@reduxjs/toolkit';
+	
+	interface VideoState {
+		title: string;
+		description: string;
+	}
+	
+	const initialState = {
+		title: '',
+		description: '',
+	} as VideoState;
+	
+	const videoSlice = createSlice({
+		name: 'video',
+		initialState,
+		reducers: {
+			updateTitle(state, action: PayloadAction<string>) {
+				state.title = action.payload;
+			},
+			
+			updateDescription(state, action: PayloadAction<string>) {
+				state.description = action.payload;
+			},
+		}
+	});
+	
+	export const { updateTitle, updateDescription } = videoSlice.actions;
+	export const videoReducer = videoSlice.reducer;
+\end{lstlisting}
+
+\begin{lstlisting}[caption={api.ts}]
+	import axios from 'axios';
+	
+	const { VITE_GATEWAY_URL } = import.meta.env;
+	
+	const api = axios.create({
+		baseURL: VITE_GATEWAY_URL,
+	});
+	
+	api.interceptors.request.use(
+	(config) => {
+		const accessToken = selectAccessToken(store.getState());
+		
+		if (accessToken) {
+			config.headers['Authorization'] = `Bearer ${accessToken}`
+		}
+		
+		return config;
+	},
+	);
+	
+	api.interceptors.response.use(
+	(response) => response,
+	async (error) => {
+		const originalRequest = error.config;
+		if (error.response?.status === 401) {
+			originalRequest._retry = true;
+			try {
+				const refreshToken = selectRefreshToken(store.getState());
+				const { data } = await axios.post<Gateway.Response.Refresh>(`${VITE_GATEWAY_URL}/auth/refresh`, {
+					refreshToken,
+				});
+				const { payload: tokens } = data;
+				store.dispatch(updateTokens(tokens));
+				const accessToken = selectAccessToken(store.getState());
+				originalRequest.headers['Authorization'] = `Bearer ${accessToken}`;
+				return api(originalRequest);
+			} catch (refreshError) {
+				return Promise.reject(refreshError);
+			}
+		}
+		return Promise.reject(error);
+	},
+	);
+	
+	export default api;
+\end{lstlisting}
+
+\begin{lstlisting}[caption={auth/sagas.ts}]
+	import { takeLatest, call, fork, put, all } from 'redux-saga/effects';
+	import { PayloadAction } from '@reduxjs/toolkit';
+	import { AxiosResponse } from 'axios';
+	
+	const {
+		VITE_TOKENS_STORAGE_KEY = '_tokens',
+	} = import.meta.env;
+	
+	function* authInit() {
+		const tokensStringified: string | null = yield call([localStorage, localStorage.getItem], VITE_TOKENS_STORAGE_KEY);
+		if (!tokensStringified) {
+			return;
+		}
+		let tokens: UpdateTokensPayload;
+		try {
+			const tokensObj = JSON.parse(tokensStringified);
+			if (!isOAuthTokens(tokensObj)) {
+				throw new Error('Invalid tokens value in storage');
+			}
+			tokens = tokensObj;
+		} catch (err) {
+			return;
+		}
+		yield put(updateTokens(tokens));
+		
+		try {
+			yield call(api.get, '/me');
+		} catch (error) {
+			yield put(reset());
+		}
+	}
+	
+	function* loginSaga(action: PayloadAction<AuthCredentials>) {
+		try {
+			const { data: { payload: tokens }, }: AxiosResponse<Gateway.Response.Login>
+			= yield call(api.post, `/auth/login`, action.payload);
+			const tokensStringified = JSON.stringify(tokens);
+			yield call([localStorage, localStorage.setItem], VITE_TOKENS_STORAGE_KEY, tokensStringified);
+			yield put(updateTokens(tokens));
+		} catch (error) {
+			yield call(console.error, 'Got error while logging in', error);
+		}
+	}
+	
+	function* logoutSaga() {
+		yield call([localStorage, localStorage.removeItem], VITE_TOKENS_STORAGE_KEY);
+		yield put(reset());
+	}
+	
+	function* registerSaga(action: PayloadAction<AuthCredentials>) {
+		try {
+			yield call(api.post, '/auth/register', action.payload);
+		} catch (error) {
+			yield call(console.error, 'Got error while registering', error);
+		}
+	}
+	
+	export function* authRootSaga() {
+		yield all([
+			fork(authInit),
+			takeLatest(login.type, loginSaga),
+			takeLatest(register.type, registerSaga),
+			takeLatest(logout.type, logoutSaga),
+		]);
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={flow-candidates/sagas.ts}]
+	import { all, call, put, takeEvery } from 'redux-saga/effects';
+	import { PayloadAction } from '@reduxjs/toolkit';
+	
+	function* addCandidateVideoSaga({ payload: { candidateId, video } }: PayloadAction<AddCandidateVideoPayload>) {
+		yield call([videoManager, videoManager.addVideo], candidateId, video);
+	}
+	
+	function* deleteCandidateByIdSaga({ payload: id }: PayloadAction<string>) {
+		yield put(deleteFlowById(id));
+		yield call([videoManager, videoManager.removeVideoById], id);
+	}
+	
+	export function* flowCandidatesRootSaga() {
+		yield all([
+			takeEvery(deleteCandidateByIdAction.type, deleteCandidateByIdSaga),
+			takeEvery(addCandidateVideoAction.type, addCandidateVideoSaga),
+		]);
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={shared/sagas.ts}]
+	import { PayloadAction } from '@reduxjs/toolkit';
+	import { Gateway } from '@stombie/retube-core';
+	import { all, call, cancel, delay, fork, put, select, take, takeLatest } from 'redux-saga/effects';
+	import { AxiosResponse } from 'axios';
+	import { Task } from 'redux-saga';
+	
+	const {
+		VITE_MAX_CHUNK_SIZE,
+		VITE_UPLOAD_DELAY,
+		VITE_STATE_POLLING_DELAY,
+		VITE_BEFORE_DISTRIBUTION_DELAY,
+		VITE_PLAYER_BASE_URL,
+	} = import.meta.env;
+	
+	const MAX_CHUNK_SIZE = Number(VITE_MAX_CHUNK_SIZE) || 8192;
+	const UPLOAD_DELAY = Number(VITE_UPLOAD_DELAY) || 0;
+	const STATE_POLLING_DELAY = Number(VITE_STATE_POLLING_DELAY) || 5_000;
+	const BEFORE_DISTRIBUTION_DELAY = Number(VITE_BEFORE_DISTRIBUTION_DELAY) || 0;
+	const STOP_COMMON_STATUSES = new Set([CommonStatus.BLOCKED, CommonStatus.DISTRIBUTED]);
+	const PLAYER_BASE_URL = VITE_PLAYER_BASE_URL || 'http://localhost:3000';
+	
+	interface UploadFlowSagaParams {
+		buffer: ArrayBuffer;
+		sessionId: string;
+	}
+	
+	function* uploadFlowSaga({ buffer, sessionId }: UploadFlowSagaParams) {
+		const chunksCount = Math.ceil(buffer.byteLength / MAX_CHUNK_SIZE);
+		
+		for (let chunkNumber = 0; chunkNumber < chunksCount; chunkNumber++) {
+			const chunkStart = chunkNumber * MAX_CHUNK_SIZE;
+			const chunkEnd = Math.min(chunkStart + MAX_CHUNK_SIZE, buffer.byteLength);
+			const chunkSize = chunkEnd - chunkStart;
+			const chunk = buffer.slice(chunkStart, chunkEnd);
+			yield call(api.post, `/upload/${sessionId}`, chunk, {
+				headers: {
+					'Content-Type': 'application/octet-stream',
+					'x-start-byte': chunkStart,
+					'x-size': chunkSize,
+				},
+			});
+			if (UPLOAD_DELAY) {
+				yield delay(UPLOAD_DELAY);
+			}
+		}
+	}
+	
+	function* pollVideoState(videoId: string) {
+		while (true) {
+			const { data: { payload: video } }: AxiosResponse<Gateway.Response.State> = yield call(api.get, `/state/${videoId}`);
+			const { flows } = video;
+			yield put(updateFlows(flows));
+			yield put(updateCommonStatus(video.status as unknown as CommonStatus));
+			yield delay(STATE_POLLING_DELAY);
+		}
+	}
+	
+	function* startUploadSaga() {
+		yield put(changeStage(Stage.LOADING));
+		try {
+			const candidateIds: string[] = yield select(selectFlowCandidates);
+			const videos = [] as Blob[];
+			const totalBytesList = [] as number[];
+			for (const candidateId of candidateIds) {
+				const video: Blob = yield call([videoManager, videoManager.getVideoById], candidateId);
+				videos.push(video);
+				totalBytesList.push(video.size);
+			}
+			
+			const title: string = yield select(selectVideoTitle);
+			const description: string = yield select(selectVideoDescription);
+			const videoBase: Gateway.Request.CreateVideo = {
+				title,
+				description,
+				totalBytesList,
+			};
+			const { data: { payload: video } }: AxiosResponse<Gateway.Response.CreateVideo> =
+			yield call(api.post, '/create-video', videoBase);
+			
+			const { status, flows } = video;
+			yield put(updateFlows(flows));
+			yield put(updateCommonStatus(status as unknown as CommonStatus));
+			
+			for (let i = 0; i < candidateIds.length; i++) {
+				yield call([videoManager, videoManager.transferVideo], candidateIds[i], flows[i].id);
+			}
+			
+			const uploadSagas = [];
+			const buffers: ArrayBuffer[] = yield all(
+			videos.map(video => call([video, video.arrayBuffer])),
+			);
+			for (let i = 0; i < flows.length; i++) {
+				const sessionId = flows[i].uploadSession?.id;
+				if (!sessionId) {
+					throw new Error('No sessionId found');
+				}
+				const buffer = buffers[i];
+				uploadSagas.push(fork(uploadFlowSaga, { buffer, sessionId }));
+			}
+			
+			
+			yield put(changeStage(Stage.UPLOADING));
+			yield all(
+			uploadSagas
+			);
+			
+			const pollVideoStateSaga: Task = yield fork(pollVideoState, video.id);
+			while (true) {
+				const { payload: commonStatus }: PayloadAction<CommonStatus> =
+				yield take(updateCommonStatus.type);
+				if (STOP_COMMON_STATUSES.has(commonStatus)) {
+					yield cancel(pollVideoStateSaga);
+					break;
+				}
+			}
+			
+			if (BEFORE_DISTRIBUTION_DELAY) {
+				yield delay(BEFORE_DISTRIBUTION_DELAY);
+			}
+			yield put(setPlayerUrl(`${PLAYER_BASE_URL}/${video.id}`));
+			yield put(changeStage(Stage.DISTRIBUTION));
+		} catch (error) {
+			yield put(changeStage(Stage.SYNCHRONIZING));
+		}
+	}
+	
+	export function* sharedRootSaga() {
+		yield all([
+			takeLatest(startUpload.type, startUploadSaga),
+		]);
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={root-saga.ts}]
+	import { all, fork } from 'redux-saga/effects';
+	
+	export function* rootSaga() {
+		yield all([
+			fork(authRootSaga),
+			fork(flowCandidatesRootSaga),
+			fork(sharedRootSaga),
+		]);
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={AuthForm.tsx}]
+	import { FC, useState } from 'react';
+	import { useDispatch } from 'react-redux';
+	
+	import css from './styles.module.styl';
+	
+	enum AuthModalStage {
+		LOGIN = 'login',
+		REGISTER = 'register'
+	}
+	
+	function getButtonView(active: boolean) {
+		if (active) {
+			return 'primary';
+		}
+		
+		return 'ordinary';
+	}
+	
+	export const AuthModal: FC = () => {    
+		const [email, setEmail] = useState<string>('');
+		const [password, setPassword] = useState<string>('');
+		const [passwordRepeat, setPasswordRepeat] = useState<string>('');
+		const [stage, setStage] = useState<AuthModalStage>(AuthModalStage.LOGIN);
+		const dispatch = useDispatch();
+		
+		const onSubmit = (evt: React.FormEvent<HTMLFormElement>) => {
+			evt.preventDefault();    
+			
+			const credentials = {
+				email,
+				password,
+			};        
+			
+			switch (stage) {
+				case AuthModalStage.LOGIN:
+				dispatch(login(credentials));
+				break;
+				case AuthModalStage.REGISTER:
+				dispatch(register(credentials));
+				break;
+			}
+		};
+		
+		const isSendButtonDisabled =
+		stage === AuthModalStage.REGISTER &&
+		(password !== passwordRepeat || !password || !passwordRepeat);
+		
+		return (
+			<div className={css.container}>
+				<form className={css.modal} onSubmit={onSubmit}>
+					<div className={css.toggler}>
+						<Button
+							view={getButtonView(stage === AuthModalStage.LOGIN)}
+							type="button"
+							className={css.button}
+							onClick={() => setStage(AuthModalStage.LOGIN)}
+						>
+							Вход
+						</Button>
+						<Button
+							view={getButtonView(stage === AuthModalStage.REGISTER)}
+							type="button"
+							className={css.button}
+							onClick={() => setStage(AuthModalStage.REGISTER)}
+						>
+							Регистрация
+						</Button>
+					</div>
+					<Input
+						type="email"
+						title="Email"
+						value={email}
+						onChange={(evt) => setEmail(evt.target.value)}
+						wrapperClassname={css.input}
+					/>
+					<Input
+						title="Пароль"
+						type="password"
+						value={password}
+						onChange={(evt) => setPassword(evt.target.value)}
+						wrapperClassname={css.input}
+					/>
+					{stage === AuthModalStage.REGISTER && (
+							<Input
+								title="Повторный пароль"
+								type="password"
+								value={passwordRepeat}
+								onChange={(evt) => setPasswordRepeat(evt.target.value)}
+								wrapperClassname={css.input}
+							/>
+						)}
+					<Button
+						className={css.button}
+						disabled={isSendButtonDisabled}
+					>
+					Отправить
+					</Button>
+				</form>
+			</div>
+		);
+	};
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Distribution.tsx}]
+	import { FC } from 'react';
+	import { useSelector } from 'react-redux';
+	
+	import css from './styles.module.styl';
+	
+	export const Distribution: FC = () => {
+		const playerUrl = useSelector(selectPlayerUrl);
+		const playerIframe = `<iframe src="${playerUrl}" allowfullscreen></iframe>`;
+		
+		return (
+			<main className={css.wrapper}>
+				<Logo className={css.logo} />
+				<h3 className={css.header}>Теперь вы можете использовать плеер!</h3>
+				<MainField
+					type="static"
+					staticContent={playerUrl}
+					rightSlot={
+						<button
+						type="button"
+						className={css.copyButton}
+						onClick={() => copyToClipboard(playerUrl)}
+						>
+						<Copy />
+						</button>
+					}
+				/>
+				<MainField
+					type="static"
+					staticContent={playerIframe}
+					rightSlot={
+						<button
+						type="button"
+						className={css.copyButton}
+						onClick={() => copyToClipboard(playerIframe)}
+						>
+						<Copy />
+						</button>
+					}
+				/>
+				<iframe src={playerUrl} className={css.player} allowFullScreen></iframe>
+			</main>
+		);
+	};
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Button.tsx}]
+	import { ButtonHTMLAttributes, FC, PropsWithChildren, ReactNode } from 'react';
+	import cn from 'classnames';
+	
+	export interface ButtonProps
+	extends Pick<ButtonHTMLAttributes<HTMLButtonElement>, 'type' | 'className' | 'onClick' | 'disabled'>,
+	PropsWithChildren {
+		view?: 'primary' | 'ordinary';
+		rounded?: boolean;
+		leftSlot?: ReactNode;
+	}
+	
+	export const Button: FC<ButtonProps> = ({
+		className,
+		view = 'primary',
+		rounded = true,
+		children,
+		leftSlot,
+		...props
+	}) => {
+		const buttonClasses = cn(
+		css.button,
+		css[`__view-${view}`],
+		{
+			[css.__rounded]: rounded,
+		},
+		className,
+		);
+		
+		return (
+			<button {...props} className={buttonClasses}>
+				{leftSlot}
+				{children}
+			</button>
+		);
+	};
+\end{lstlisting}
+
+\begin{lstlisting}[caption={config/slice.ts}]
+	import { FC, useEffect, useState } from 'react';
+	
+	export interface CandidateProps {
+		video?: Blob;
+		onVideoDropped?: (video: Blob) => void;
+		onDelete?: () => void;
+		progress?: number;
+	}
+	
+	export const Candidate: FC<CandidateProps> = ({
+		video,
+		onVideoDropped,
+		onDelete,
+		progress,
+	}) => {
+		const [videoUrl, setVideoUrl] = useState<Maybe<string>>();
+		const [isDragOver, setIsDragOver] = useState<boolean>(false);
+		const isUploadingDisabled = Boolean(video);
+		
+		const handleFileList = (fileList: FileList) => {
+			const videoFiles = Array.from(fileList)
+			.filter(file => file.type.startsWith('video/'));
+			if (!videoFiles.length) {
+				return;
+			}
+			
+			const video = videoFiles[0];
+			onVideoDropped?.(video);
+		};
+		
+		const onDrop = (evt: React.DragEvent<HTMLLabelElement>) => {
+			evt.preventDefault();
+			evt.stopPropagation();
+			
+			if (isUploadingDisabled) {
+				return;
+			}
+			
+			handleFileList(evt.dataTransfer.files);
+		};
+		
+		const onDragOver = (evt: React.DragEvent<HTMLLabelElement>) => {
+			evt.preventDefault();
+			setIsDragOver(true);
+		};
+		
+		const onDragLeave = (evt: React.DragEvent<HTMLLabelElement>) => {
+			setIsDragOver(false);
+		};
+		
+		const onInputChange = (evt: React.ChangeEvent<HTMLInputElement>) => {
+			if (evt.target.files) {
+				handleFileList(evt.target.files);
+			}
+		};
+		
+		useEffect(() => {
+			if (video) {
+				onVideoDropped?.(video);
+				
+				const blobVideoUrl = URL.createObjectURL(video);
+				setVideoUrl(blobVideoUrl);
+				
+				return () => {
+					setVideoUrl(undefined);
+					URL.revokeObjectURL(blobVideoUrl)
+				};
+			}
+		}, [video]);
+		
+		const dropAreaClasses = cn(
+		css.dropArea,
+		{
+			[css.__disabled]: isUploadingDisabled,
+			[css.__dragOver]: isDragOver,
+		}
+		);
+		
+		const isWaitingUpload = !video && Boolean(onVideoDropped);
+		const isInProgress = typeof progress == 'number';
+		
+		return (
+		<div className={cn(css.candidateWrapper, 'candidate')}>
+			{onVideoDropped && (
+				<button type="button" className={css.deleteButton} onClick={onDelete}>
+					Удалить
+				</button>
+			)}
+			{videoUrl && (
+				<div className={css.videoWrapper}>
+					<video
+						className={css.video}
+						src={videoUrl}
+						autoPlay
+						loop
+						muted
+						playsInline
+					>
+					</video>
+				</div>
+				)}
+			{isInProgress && (
+				<div className={css.loaderContainer}>
+					<Loader
+					className={css.loader}
+					progress={progress}
+					/>
+				</div>
+			)}
+			{isWaitingUpload && (
+				<label
+					className={dropAreaClasses}
+					onDragOver={onDragOver}
+					onDragLeave={onDragLeave}
+					onDrop={onDrop}
+				>
+					<input
+						type="file"
+						className={css.input}
+						onChange={onInputChange}
+						disabled={isUploadingDisabled}
+					/>
+					Загрузите видео
+				</label>
+			)}
+		</div>
+		);
+	};
+\end{lstlisting}
+
+\begin{lstlisting}[caption={DynamicMainField.tsx}]
+	import { FC, useCallback } from 'react';
+	
+	export const DynamicMainField: FC<DynamicMainFieldProps> = ({
+		rightSlot,
+		placeholder,
+		content,
+		onChangeContent,
+		className,
+	}) => {
+		const onChange = useCallback((evt: React.ChangeEvent<HTMLInputElement>) => {
+			onChangeContent(evt.target.value);
+		}, [onChangeContent]);
+		
+		const fieldClasses = cn(
+		css.field,
+		className,
+		);
+		
+		return (
+		<label className={fieldClasses}>
+				<input
+				className={css.content}
+				value={content}
+				onChange={onChange}
+				placeholder={placeholder}
+			/>
+			{rightSlot}
+		</label>
+		);
+	};
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Input.tsx}]
+	import { FC, HTMLAttributes, InputHTMLAttributes } from 'react';
+	import cn from 'classnames';
+	
+	export interface InputProps
+	extends Pick<InputHTMLAttributes<HTMLInputElement>, 'type' | 'value' | 'onChange'> {
+		title?: string;
+		wrapperClassname?: HTMLAttributes<HTMLLabelElement>['className'];
+	}
+	
+	export const Input: FC<InputProps> = ({ title, wrapperClassname, ...inputProps }) => {
+		const wrapperClasses = cn(
+		css.wrapper,
+		wrapperClassname,
+		);
+		
+		return (
+			<label className={wrapperClasses}>
+				{title && (
+					<h5 className={css.header}>
+						{title}
+					</h5>
+				)}
+				<input
+					{...inputProps}
+					className={css.field}
+					placeholder={title}
+				/>
+			</label>
+		);
+	};
+\end{lstlisting}
+
+\begin{lstlisting}[caption={config/slice.ts}]
+	import { FC, HTMLAttributes } from 'react';
+	import cn from 'classnames';
+	
+	const OFFSET = 130;
+	
+	export interface LoaderProps extends Pick<HTMLAttributes<HTMLSpanElement>, 'className'> {
+		/** [0-100] */
+		progress?: number;
+	}
+	
+	export const Loader: FC<LoaderProps> = ({ className, progress = 100 }) => {
+		const loaderClasses = cn(
+			css.loader,
+			className,
+		);
+		const loaderStyles: Record<string, string> = {
+			'--loader-progress': String(Math.round(OFFSET - OFFSET * progress / 100)),
+		};
+		
+		return <span className={loaderClasses} style={loaderStyles}>
+			<svg height="60" width="60">
+				<circle cx="30" cy="30" r="20" stroke-width="10" fill="none" />
+			</svg>
+		</span>;
+	};
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Loading.tsx}]
+	import { FC } from 'react';
+	
+	export const Loading: FC = () => {
+		return (
+			<div className={css.loadingWrapper}>
+				<Loader />
+			</div>
+		);
+	};
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Logo.tsx}]
+	import { FC, HTMLAttributes } from 'react';
+	import cn from 'classnames';
+	
+	export interface LogoProps
+	extends Pick<HTMLAttributes<HTMLDivElement>, 'className'> {
+	}
+	
+	export const Logo: FC<LogoProps> = ({ className }) => {
+		const logoClasses = cn(
+		css.wrapper,
+		className,
+		);
+		
+		return (
+			<div className={logoClasses}>
+				<PlayIcon />
+				<span className={css.text}>
+					SynchroTube
+				</span>
+			</div>
+		);
+	};
+\end{lstlisting}
+
+\begin{lstlisting}[caption={LogoutButton.tsx}]
+	import { FC } from 'react';
+	import { useDispatch } from 'react-redux';
+	import { Button } from '../button';
+	import { logout } from '../../store/auth/slice';
+	import CloseIcon from '../../assets/icons/close.svg?react';
+	
+	import css from './styles.module.styl';
+	
+	export const LogoutButton: FC = () => {
+		const dispatch = useDispatch();    
+		
+		const onClick = () => {
+			dispatch(logout());
+		};  
+		
+		return (
+			<Button
+				view="primary"
+				className={css.logoutButton}
+				leftSlot={<CloseIcon />}
+				onClick={onClick}
+			>
+				Выход
+			</Button>
+		);
+	};
+\end{lstlisting}
+
+\begin{lstlisting}[caption={MainField.tsx}]
+	import { FC } from 'react';
+	
+	interface DeterminedStaticMainFieldProps extends StaticMainFieldProps {
+		type: 'static';
+	}
+	
+	interface DeterminedDynamicMainFieldProps extends DynamicMainFieldProps {
+		type: 'dynamic';
+	}
+	
+	export type MainFieldProps = DeterminedStaticMainFieldProps | DeterminedDynamicMainFieldProps;
+	
+	export const MainField: FC<MainFieldProps> = (props) => {
+		const content = (() => {
+			switch (props.type) {
+				case 'dynamic':
+				return <DynamicMainField {...props} />;
+				case 'static':
+				return <StaticMainField {...props} />;
+			}
+		})();
+		
+		return content;
+	};
+\end{lstlisting}
+
+\begin{lstlisting}[caption={StaticMainField.tsx}]
+	import { FC } from 'react';
+	import cn from 'classnames';
+	
+	import css from './styles.module.styl';
+	
+	export const StaticMainField: FC<StaticMainFieldProps> = ({ className, staticContent, rightSlot }) => {
+		const fieldClasses = cn(
+		css.field,
+		className
+		);    
+		
+		return (
+			<div className={fieldClasses}>
+				<span className={css.content}>
+					{staticContent}
+				</span>
+				{rightSlot}
+			</div>
+		);
+	};
+\end{lstlisting}
+
+\begin{lstlisting}[caption={SyncForm.tsx}]
+	import { FC } from 'react';
+	import { v4 as uuid } from 'uuid';
+	import { useDispatch, useSelector } from 'react-redux';
+	
+	import css from './styles.module.styl';
+	
+	const MAXIMUM_CANDIDATES_COUNT = 4;
+	
+	export const SyncForm: FC = () => {
+		const candidates = useSelector(selectFlowCandidates);
+		const title = useSelector(selectVideoTitle);
+		const description = useSelector(selectVideoDescription);
+		const videoManager = useVideoManager();
+		const dispatch = useDispatch();
+		
+		const flowsContent = candidates.map(candidateId => (
+			<Candidate
+				key={candidateId}
+				video={videoManager.getVideoById(candidateId)}
+				onVideoDropped={video => dispatch(addCandidateVideoAction({ candidateId, video }))}
+				onDelete={() => dispatch(deleteCandidateByIdAction(candidateId))}
+			/>
+		));
+		
+		const allCandidatesHaveVideo = candidates.every(candidateId => videoManager.getVideoById(candidateId) instanceof Blob);
+		
+		const onAddFlow = () => {
+			dispatch(addCandidate(uuid()));
+		};
+		
+		const onUpload = () => {
+			dispatch(startUpload());
+		};
+		
+		const onTitleChange = (title: string) => {
+			dispatch(updateTitle(title));
+		};
+		
+		const onDescriptionChange = (description: string) => {
+			dispatch(updateDescription(description));
+		};
+		
+		return (
+			<div className={css.form}>
+				<Logo className={css.logo} />
+				<MainField
+					type="dynamic"
+					className={css.field}
+					placeholder="Заголовок видео"
+					content={title}
+					onChangeContent={onTitleChange}
+				/>
+				<MainField
+					type="dynamic"
+					className={css.field}
+					placeholder="Описание видео"
+					content={description}
+					onChangeContent={onDescriptionChange}
+				/>
+				{flowsContent.length ? (
+					<div className={css.flows}>
+						{flowsContent}
+					</div>
+					) : (
+					<div className={css.motivationText}>
+						Загрузите свое видео в несколько потоков
+					</div>
+				)}
+				<div className={css.buttons}>
+					<Button
+						view="ordinary"
+						type="button"
+						onClick={onAddFlow}
+						leftSlot={<UploadIcon />}
+						disabled={candidates.length >= MAXIMUM_CANDIDATES_COUNT}
+					>
+						Добавить поток
+					</Button>
+					{Boolean(candidates.length) && (
+						<Button
+							view="ordinary"
+							type="button"
+							className={css.button}
+							onClick={onUpload}
+							disabled={!allCandidatesHaveVideo}
+						>
+							Загрузить
+						</Button>
+					)}
+				</div>
+			</div>
+		);
+	};
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Uploading.tsx}]
+	import { FC } from 'react';
+	import { useSelector } from 'react-redux';
+	
+	export const Uploading: FC = () => {    
+		const flows = useSelector(selectUploadingFlows);
+		const videoManager = useVideoManager();
+		
+		const candidates = flows.map((flow) => {
+			const uploadSession = flow.uploadSession;
+			const progress = uploadSession
+			? Math.round(uploadSession.uploadedBytes * 100 / uploadSession.totalBytes)
+			: undefined;
+			
+			return (
+				<Candidate
+					key={flow.id}
+					video={videoManager.getVideoById(flow.id)}
+					progress={progress}
+				/>
+			);
+		});
+		
+		return (
+			<main className={css.wrapper}>
+				<Logo className={css.logo} />
+				<h2 className={css.header}>Загружаем видео</h2>
+				{candidates}
+			</main>
+		);
+	};
+	
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Root.tsx}]
+	import { createRoot } from 'react-dom/client';
+	import { Provider } from 'react-redux';
+	
+	const root = createRoot(
+		document.getElementById('root') as HTMLElement
+	);
+	
+	root.render(
+		<Provider store={store}>
+			<VideoManagerProvider>
+				<App />
+			</VideoManagerProvider>
+		</Provider>
+	);
+\end{lstlisting}
+
+\begin{lstlisting}[caption={App.tsx}]
+	import { FC } from 'react';
+	import { useSelector } from 'react-redux';
+	import cn from 'classnames';
+	
+	import css from './styles.module.css';
+	
+	export const App: FC = () => {    
+		const isAuthenticated = useSelector(selectIsAuthenticated);
+		const stage = useSelector(selectStage);
+		
+		const content = (() => {
+			switch (stage) {
+				case Stage.SYNCHRONIZING:
+				return <SyncForm />;
+				case Stage.LOADING:
+				return <Loading />;
+				case Stage.UPLOADING:
+				return <Uploading />;
+				case Stage.DISTRIBUTION:
+				return <Distribution />;
+			}
+		})();
+		
+		return (
+			<div className={cn(css.container, css.themeCommon)}>
+				<div className={cn(css.wrapper)}>
+					{content}
+					{!isAuthenticated && (
+						<AuthModal />
+					)}
+				</div>
+				{isAuthenticated && (
+					<LogoutButton />
+				)}
+			</div>
+		);
+	};
+\end{lstlisting}

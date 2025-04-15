@@ -1,0 +1,486 @@
+\chapter{Программный код сервиса-транскодировщика}
+
+\begin{lstlisting}[caption={config.ts}]
+	import { registerAs } from '@nestjs/config';
+	
+	export const AppConfig = registerAs('app', () => ({
+		globalPrefix: process.env.GLOBAL_PREFIX,
+		host: process.env.HOST,
+		dataFolder: process.env.DATA_FOLDER,
+	}));
+	
+	export const FFmpegConfig = registerAs('ffmpeg', () => ({
+		videoCodec: process.env.FFMPEG_VIDEO_CODEC,
+		audioCodec: process.env.FFMPEG_AUDIO_CODEC,
+		videoBitrate: process.env.FFMPEG_VIDEO_BITRATE,
+		audioBitrate: process.env.FFMPEG_AUDIO_BITRATE,
+		dashSegmentDuration: parseInt(process.env.FFMPEG_DASH_SEGMENT_DURATION, 10) || null,
+		dashSegmentFormat: process.env.FFMPEG_DASH_SEGMENT_FORMAT,
+		hlsTime: parseInt(process.env.FFMPEG_HLS_TIME, 10) || null,
+		hlsPlaylistType: process.env.FFMPEG_HLS_PLAYLIST_TYPE,
+		manifestFilename: process.env.FFMPEG_MANIFEST_FILENAME
+	}));
+	
+	export const FtpConfig = registerAs('ftp', () => ({
+		serverHost: process.env.FTP_SERVER_HOST,
+		serverPort: parseInt(process.env.FTP_SERVER_PORT, 10),
+	}));
+\end{lstlisting}
+
+\begin{lstlisting}[caption={app.controller.ts}]
+	import { Controller, Post, Param, Delete, HttpException, HttpStatus, Req, Logger } from '@nestjs/common';
+	import { Request } from 'express';
+	import { ConfigService } from '@nestjs/config';
+	
+	@Controller()
+	export class AppController {
+		private readonly logger = new Logger(AppController.name);
+		private readonly globalPrefix: string;
+		private readonly host: string;
+		
+		constructor(private readonly app: AppService,
+		configService: ConfigService) {
+			this.globalPrefix = configService.get<string>('app.globalPrefix', '');
+			this.host = configService.get<string>('app.host', 'localhost');
+		}
+		
+		/**
+		* Создание нового потока ffmpeg
+		*/
+		@Post(':uploadSessionId')
+		async createFlow(
+		@Req() request: Request,
+		@Param('uploadSessionId') uploadSessionId?: string,
+		): Promise<FFlow.Response.Create> {
+			this.logger.log(`createFlow ${uploadSessionId}`);
+			try {
+				// Создание потока
+				await this.app.createFlow(uploadSessionId);
+				
+				const protocol = request.protocol;
+				// Возвращаем ссылку на flowUrl
+				const flowUrl = `${protocol}://${this.host}${this.globalPrefix}/${uploadSessionId}`;
+				return {
+					status: 'success',
+					message: `Flow created for session ${uploadSessionId}`,
+					flowUrl,
+				};
+			} catch (error) {
+				throw new HttpException(
+				{
+					status: 'error',
+					message: `Failed to create flow: ${error.message}`,
+				},
+				HttpStatus.INTERNAL_SERVER_ERROR,
+				);
+			}
+		}
+		
+		/**
+		* Удаление существующего потока ffmpeg
+		*/
+		@Delete(':uploadSessionId/delete')
+		async deleteFlow(@Param('uploadSessionId') uploadSessionId: string): Promise<FFlow.Response.Delete> {
+			try {
+				await this.app.deleteFlow(uploadSessionId);
+				return {
+					status: 'success',
+					message: `Flow for session ${uploadSessionId} deleted successfully`,
+				};
+			} catch (error) {
+				if (error instanceof FlowNotFoundError) {
+					throw new HttpException(
+					{
+						status: 'error',
+						message: error.message,
+					},
+					HttpStatus.NOT_FOUND,
+					);
+				}
+				throw new HttpException(
+				{
+					status: 'error',
+					message: `Failed to delete flow: ${error.message}`,
+				},
+				HttpStatus.INTERNAL_SERVER_ERROR,
+				);
+			}
+		}
+		
+		/**
+		* Отправка данных в поток ffmpeg
+		*/
+		@Post(':uploadSessionId/push')
+		async pushToFlow(
+		@Param('uploadSessionId') uploadSessionId: string,
+		@Body() buffer: Buffer,
+		): Promise<FFlow.Response.Push> {
+			this.logger.log(`pushToFlow ${uploadSessionId} ${buffer.length}`);
+			try {
+				this.app.pushToFlow(uploadSessionId, buffer);
+				return {
+					status: 'success',
+					message: `Data pushed to flow for session ${uploadSessionId}`,
+				};
+			} catch (error) {
+				console.error('pushToFlow', error);
+				if (error instanceof FlowNotFoundError) {
+					throw new HttpException(
+					{
+						status: 'error',
+						message: error.message,
+					},
+					HttpStatus.NOT_FOUND,
+					);
+				}
+				throw new HttpException(
+				{
+					status: 'error',
+					message: `Failed to push data to flow: ${error.message}`,
+				},
+				HttpStatus.INTERNAL_SERVER_ERROR,
+				);
+			}
+		}
+		
+		/**
+		* Завершение потока (flow) для указанной сессии
+		*/
+		@Post(':uploadSessionId/finish')
+		async finishFlow(
+		@Param('uploadSessionId') uploadSessionId: string,
+		@Body() finishParams: FFlow.Request.Finish,
+		): Promise<FFlow.Response.Finish> {
+			this.logger.log(`finishFlow: ${uploadSessionId}, ${finishParams.savingPath}`);
+			try {
+				// Вызов метода для завершения потока
+				await this.app.finishFlow(uploadSessionId, finishParams);
+				
+				return {
+					status: 'success',
+					message: `Flow finished for session ${uploadSessionId}`,
+				};
+			} catch (error) {
+				// Обработка ошибки, если поток не найден
+				if (error instanceof FlowNotFoundError) {
+					throw new HttpException(
+					{
+						status: 'error',
+						message: error.message,
+					},
+					HttpStatus.NOT_FOUND,
+					);
+				}
+				// Обработка других ошибок
+				throw new HttpException(
+				{
+					status: 'error',
+					message: `Failed to finish flow: ${error.message}`,
+				},
+				HttpStatus.INTERNAL_SERVER_ERROR,
+				);
+			}
+		}
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={app.service.ts}]
+	import * as fs from 'fs/promises';
+	import { Injectable, Logger } from '@nestjs/common';
+	
+	@Injectable()
+	export class AppService {
+		private readonly logger = new Logger(AppService.name);
+		private readonly dashManifestFilename: string;
+		private readonly hlsManifestFilename: string;
+		
+		constructor(config: ConfigService,
+		private readonly fflow: FFlowService,
+		private readonly path: PathService,
+		private readonly ftpSessionsOrchestrator: FtpSessionsOrchestratorService) {
+			const manifestName = config.get<string>('ffmpeg.manifestName', 'manifest');
+			this.dashManifestFilename = `${manifestName}.mpd`;
+			this.hlsManifestFilename = `${manifestName}.m3u8`;
+		}
+		
+		async createFlow(uploadSessionId: string) {
+			const hlsUploadDir = this.path.hlsFFlow(uploadSessionId);
+			const dashUploadDir = this.path.dashFFlow(uploadSessionId);
+			const hlsUploadPath = this.path.hlsFFlow(uploadSessionId, this.hlsManifestFilename);
+			const dashUploadPath = this.path.dashFFlow(uploadSessionId, this.dashManifestFilename);
+			await Promise.all([
+			fs.mkdir(hlsUploadDir, { recursive: true }),
+			fs.mkdir(dashUploadDir, { recursive: true }),
+			this.fflow.createFlow(uploadSessionId, {
+				hlsOutput: hlsUploadPath,
+				dashOutput: dashUploadPath,
+			}),
+			]);
+		}
+		
+		async deleteFlow(uploadSessionId: string) {
+			await this.fflow.deleteFlow(uploadSessionId);
+			const uploadDir = this.path.uploadDir(uploadSessionId);
+			await fs.rm(uploadDir, { recursive: true, force: true });
+		}
+		
+		async finishFlow(uploadSessionId: string, { savingPath }: FFlow.FinishParams) {
+			await this.fflow.finishFlow(uploadSessionId);
+			const uploadDir = this.path.uploadDir(uploadSessionId);
+			const ftpSession = await this.ftpSessionsOrchestrator.create();
+			await ftpSession.createDir(savingPath);
+			await ftpSession.uploadFromDir(
+			uploadDir,
+			savingPath,
+			);
+			this.logger.log(`Successfully uploaded files of ${uploadSessionId}`);
+			await fs.rm(uploadDir, { recursive: true, force: true });
+			ftpSession.destroy();
+		}
+		
+		pushToFlow(uploadSessionId: string, buffer: Buffer) {
+			this.fflow.pushToFlow(uploadSessionId, buffer);
+		}
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={fflow.service.ts}]
+	import { Injectable, Logger } from '@nestjs/common';
+	import { ConfigService } from '@nestjs/config';
+	import { ChildProcess, spawn } from 'child_process';
+	import { FlowNotFoundError } from '../errors/flow-not-found.error';
+	import { FlowAlreadyExistsError } from '../errors/flow-already-exists.error';
+	import { FFmpegArg, ffmpegArgsBuilder } from '../utils/ffmpeg';
+	
+	export interface CreateFlowParams {
+		dashOutput: string;
+		hlsOutput: string;
+	}
+	
+	@Injectable()
+	export class FFlowService {
+		private readonly logger = new Logger(FFlowService.name);
+		private readonly flowBySessionId: Record<string, ChildProcess>;
+		private readonly videoCodec: string;
+		private readonly audioCodec: string;
+		private readonly videoBitrate: string;
+		private readonly audioBitrate: string;
+		private readonly dashSegmentDuration: number;
+		private readonly dashSegmentFormat: string;
+		private readonly hlsTime: number;
+		private readonly hlsPlaylistType: string;
+		
+		private readonly logLevel: string;
+		
+		constructor(configService: ConfigService) {
+			this.flowBySessionId = {};
+			this.videoCodec = configService.get<string>('ffmpeg.videoCodec', 'libx264');
+			this.audioCodec = configService.get<string>('ffmpeg.audioCodec', 'aac');
+			this.videoBitrate = configService.get<string>('ffmpeg.videoBitrate', '5000k');
+			this.audioBitrate = configService.get<string>('ffmpeg.audioBitrate', '192k');
+			this.dashSegmentDuration = configService.get<number>('ffmpeg.dashSegmentDuration', 10);
+			this.dashSegmentFormat = configService.get<string>('ffmpeg.dashSegmentFormat', 'mp4');
+			this.hlsTime = configService.get<number>('ffmpeg.hlsTime', 4);
+			this.hlsPlaylistType = configService.get<string>('hlsPlaylistType', 'vod');
+			this.logLevel = configService.get<string>('ffmpeg.logLevel', 'debug');
+		}
+		
+		createFlow(uploadSessionId: string, { dashOutput, hlsOutput }: CreateFlowParams) {
+			const args = ffmpegArgsBuilder()
+				.addInput('pipe:0')
+				.addArg(FFmpegArg.VIDEO_CODEC, this.videoCodec)
+				.addArg(FFmpegArg.AUDIO_CODEC, this.audioCodec)
+				.addArg(FFmpegArg.VIDEO_BITRATE, this.videoBitrate)
+				.addArg(FFmpegArg.AUDIO_BITRATE, this.audioBitrate)
+				.addArg(FFmpegArg.FORMAT, 'dash')
+				.addArg(FFmpegArg.SEGMENT_DURATION, this.dashSegmentDuration)
+				.addArg(FFmpegArg.SEGMENT_FORMAT, this.dashSegmentFormat)
+				.addArg(FFmpegArg.LOG_LEVEL, this.logLevel)
+				.addOutput(dashOutput)
+				.addArg(FFmpegArg.FORMAT, 'hls')
+				.addArg(FFmpegArg.HLS_PLAYLIST_TYPE, this.hlsPlaylistType)
+				.addArg(FFmpegArg.HLS_TIME, this.hlsTime)
+				.addOutput(hlsOutput)
+				.build();
+			this.logger.log(`args ${args}`);
+			if (this.flowBySessionId[uploadSessionId]) {
+				throw new FlowAlreadyExistsError(uploadSessionId);
+			}
+			const process = spawn('ffmpeg', args);
+			process.stderr.on('data', data => {
+				this.logger.debug(`DEBUG<${uploadSessionId}>: ${data}`);
+			});
+			process.stdout.on('data', data => {
+				this.logger.debug(`INFO<${uploadSessionId}>: ${data}`);
+			});
+			this.flowBySessionId[uploadSessionId] = process;
+		}
+		
+		async deleteFlow(uploadSessionId: string) {
+			this.checkFlowExistance(uploadSessionId);
+			await this.killFlow(uploadSessionId);
+		}
+		
+		pushToFlow(uploadSessionId: string, buffer: Buffer) {
+			this.checkFlowExistance(uploadSessionId);
+			this.flowBySessionId[uploadSessionId].stdin.write(buffer);
+		}
+		
+		async finishFlow(uploadSessionId: string): Promise<void> {
+			this.checkFlowExistance(uploadSessionId);
+			const destroyPromise = this.listenDestroy(uploadSessionId);
+			this.flowBySessionId[uploadSessionId].stdin.end();
+			await destroyPromise;
+			console.log(`finishFlow: Successfully finished with ${uploadSessionId}`);
+			delete this.flowBySessionId[uploadSessionId];
+		}
+		
+		private async killFlow(uploadSessionId: string) {
+			const destroyPromise = this.listenDestroy(uploadSessionId);
+			this.flowBySessionId[uploadSessionId].kill('SIGKILL');
+			await destroyPromise;
+			delete this.flowBySessionId[uploadSessionId];
+		}
+		
+		private listenDestroy(uploadSessionId: string) {
+			const destroyTasks = [
+			new Promise(resolve => {
+				this.flowBySessionId[uploadSessionId].on('exit', resolve);
+			}),
+			new Promise(resolve => {
+				this.flowBySessionId[uploadSessionId].on('close', resolve)
+			})
+			];
+			return Promise.all(destroyTasks);
+		}
+		
+		private checkFlowExistance(uploadSessionId: string) {
+			if (!this.flowBySessionId[uploadSessionId]) {
+				throw new FlowNotFoundError(uploadSessionId);
+			}
+		}
+	}
+\end{lstlisting}
+
+
+\begin{lstlisting}[caption={ftp-sessions-orchestrator.service.ts}]
+	import { Injectable } from '@nestjs/common';
+	import { ConfigService } from '@nestjs/config';
+	
+	@Injectable()
+	export class FtpSessionsOrchestratorService {
+		private readonly serverHost: string;
+		private readonly serverPort: number;
+		
+		constructor(configService: ConfigService) {
+			this.serverHost = configService.get<string>('ftp.serverHost', 'localhost');
+			this.serverPort = configService.get<number>('ftp.serverPort', 21);
+		}
+		
+		async create() {
+			const ftpSession = new FtpSession({
+				host: this.serverHost,
+				port: this.serverPort,
+			});
+			await ftpSession.launch();
+			return ftpSession;
+		}
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={path.service.ts}]
+	import * as path from 'path';
+	import { Injectable } from '@nestjs/common';
+	import { ConfigService } from '@nestjs/config';
+	
+	@Injectable()
+	export class PathService {
+		private readonly dataFolder: string;
+		
+		constructor(configService: ConfigService) {
+			this.dataFolder = configService.get<string>('app.dataFolder', '/data');
+		}
+		
+		uploadDir(uploadSessionId: string) {
+			return path.join(this.dataFolder, uploadSessionId);
+		}
+		
+		dashFFlow(uploadSessionId: string, filename?: string) {
+			return path.join(this.dataFolder, this.dashFFlowPath(uploadSessionId, filename));
+		}
+		
+		dashFFlowPath(uploadSessionId: string, filename?: string) {
+			return this.fflowPath(uploadSessionId, 'dash', filename);
+		}
+		
+		hlsFFlow(uploadSessionId: string, filename?: string) {
+			return path.join(this.dataFolder, this.hlsFFlowPath(uploadSessionId, filename));
+		}
+		
+		hlsFFlowPath(uploadSessionId: string, filename?: string) {
+			return this.fflowPath(uploadSessionId, 'hls', filename);
+		}
+		
+		fflow(uploadSessionId: string, format: FFlow.FFmpegFormat, filename?: string) {
+			return path.join(this.dataFolder, this.fflowPath(uploadSessionId, format, filename));
+		}
+		
+		fflowPath(uploadSessionId: string, format: FFlow.FFmpegFormat, filename?: string) {
+			if (filename) {
+				return path.join(uploadSessionId, format, filename);
+			}
+			return path.join(uploadSessionId, format);
+		}
+	}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={ffmpeg-args-builder.service.ts}]
+	export enum FFmpegArg {
+		INPUT = '-i',
+		VIDEO_CODEC = '-c:v',
+		AUDIO_CODEC = '-c:a',
+		VIDEO_BITRATE = '-b:v',
+		AUDIO_BITRATE = '-b:a',
+		FORMAT = '-f',
+		SEGMENT_DURATION = '-segment_time',
+		SEGMENT_FORMAT = '-segment_format',
+		HLS_TIME = '-hls_time',
+		HLS_PLAYLIST_TYPE = '-hls_playlist_type',
+		DASH_INIT_SEG_NAME = '-init_seg_name',
+		DASH_MEDIA_SEG_NAME = '-media_seg_name',
+		DASH_USE_TEMPLATE = '-use_template',
+		DASH_USE_TIMELINE = '-use_timeline',
+		LOG_LEVEL = '-loglevel'
+	}
+	
+	class FFmpegArgsBuilder {
+		private args: string[] = [];
+		
+		addArg(key: FFmpegArg, value: string | number | boolean = true): this {
+			if (typeof value === 'boolean') {
+				if (value) {
+					this.args.push(key);
+				}
+			} else {
+				this.args.push(key, value.toString());
+			}
+			return this;
+		}
+		
+		addInput(input: string): this {
+			return this.addArg(FFmpegArg.INPUT, input);
+		}
+		
+		addOutput(outputFile: string): this {
+			this.args.push(outputFile);
+			return this;
+		}
+		
+		build(): string[] {
+			return this.args;
+		}
+	}
+	
+	export const ffmpegArgsBuilder = () => new FFmpegArgsBuilder();
+\end{lstlisting}
+

@@ -1,73 +1,93 @@
-\chapter{Некоторые дополнительные примеры}\label{appendix-extra-examples}							% 
+\chapter{Программный код сервиса-хранилища статического видеконтента}
 
-В приложении\footnote{Внимание! Пример оформления подстрочной ссылки (сноски).} приведены формулы \eqref{eq:Pi-app}, \eqref{eq:Pi-app-}, \firef{fig:spbpu_hydrotower-app}, \firef{fig:spbpu_hydrotower-app-}, \taref{tab:ToyCompare-app}, \taref{tab:ToyCompare-app-}
+\begin{lstlisting}[caption={config.ts}]
+	import { registerAs } from '@nestjs/config';
+	
+	export const AppConfig = registerAs('app', () => ({
+		rootPath: process.env.ROOT_PATH,
+	}));
+	
+	export const FtpConfig = registerAs('ftp', () => ({
+		url: process.env.FTP_URL,
+		pasvMinPort: parseInt(process.env.FTP_PASV_MIN_PORT, 10),
+		pasvMaxPort: parseInt(process.env.FTP_PASV_MAX_PORT, 10),
+	}));
+\end{lstlisting}
 
+\begin{lstlisting}[caption={distribution.module.ts}]
+	import { Module } from '@nestjs/common';
+	import { ConfigModule } from '@nestjs/config';
+	import { ServeStaticModule } from '@nestjs/serve-static';
+	
+	@Module({
+		imports: [
+		ServeStaticModule.forRoot({
+			rootPath: process.env.ROOT_PATH || '/data',
+		}),
+		ConfigModule.forRoot({
+			isGlobal: true,
+			load: [AppConfig]
+		})
+		],
+	})
+	export class DistributionModule {}
+\end{lstlisting}
 
-\begin{equation}% лучше не оставлять пропущенную строку (\par) перед окружениями для избежания лишних отсупов в pdf
-\label{eq:Pi-app-} % eq - equations, далее название, ch поставлено для избежания дублирования
-\pi \approx 3,141.
-\end{equation}
-%
-%
-\begin{figure}[ht!] 
-	\center
-	\includegraphics [scale=0.27] {my_folder/images//spbpu_hydrotower}
-	\caption{Вид на гидробашню СПбПУ \cite{spbpu-gallery}} 
-	\label{fig:spbpu_hydrotower-app-}  
-\end{figure}
+\begin{lstlisting}[caption={uploader.module.ts}]
+	import { Module } from '@nestjs/common';
+	import { ConfigModule } from '@nestjs/config';
+	
+	@Module({
+		imports: [
+		ConfigModule.forRoot({
+			isGlobal: true,
+			load: [FtpConfig, AppConfig]
+		})
+		],
+		providers: [FtpService],
+	})
+	export class UploadModule {}
+\end{lstlisting}
 
-\begin{table} [htbp]% Пример оформления таблицы
-	\centering\small
-	\caption{Представление данных для сквозного примера по ВКР \cite{Peskov2004}}%
-	\label{tab:ToyCompare-app-}		
-	\begin{tabular}{|l|l|l|l|l|l|}
-		\hline
-		$G$&$m_1$&$m_2$&$m_3$&$m_4$&$K$\\
-		\hline
-		$g_1$&0&1&1&0&1\\ \hline
-		$g_2$&1&2&0&1&1\\ \hline
-		$g_3$&0&1&0&1&1\\ \hline
-		$g_4$&1&2&1&0&2\\ \hline
-		$g_5$&1&1&0&1&2\\ \hline
-		$g_6$&1&1&1&2&2\\ \hline		
-	\end{tabular}	
-	\normalsize% возвращаем шрифт к нормальному
-\end{table}
-
-
-
-
-\section{Подраздел приложения}\label{app-2-1}							
-
-
-\begin{equation}% лучше не оставлять пропущенную строку (\par) перед окружениями для избежания лишних отсупов в pdf
-\label{eq:Pi-app} % eq - equations, далее название, ch поставлено для избежания дублирования
-\pi \approx 3,141.
-\end{equation}
-%
-%
-\begin{figure}[ht!] 
-	\center
-	\includegraphics [scale=0.27] {my_folder/images//spbpu_hydrotower}
-	\caption{Вид на гидробашню СПбПУ \cite{spbpu-gallery}} 
-	\label{fig:spbpu_hydrotower-app}  
-\end{figure}
-
-\begin{table} [htbp]% Пример оформления таблицы
-	\centering\small
-	\caption{Представление данных для сквозного примера по ВКР \cite{Peskov2004}}%
-	\label{tab:ToyCompare-app}		
-	\begin{tabular}{|l|l|l|l|l|l|}
-		\hline
-		$G$&$m_1$&$m_2$&$m_3$&$m_4$&$K$\\
-		\hline
-		$g_1$&0&1&1&0&1\\ \hline
-		$g_2$&1&2&0&1&1\\ \hline
-		$g_3$&0&1&0&1&1\\ \hline
-		$g_4$&1&2&1&0&2\\ \hline
-		$g_5$&1&1&0&1&2\\ \hline
-		$g_6$&1&1&1&2&2\\ \hline		
-	\end{tabular}	
-	\normalsize% возвращаем шрифт к нормальному
-\end{table}
-
+\begin{lstlisting}[caption={ftp.service.ts}]
+	import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+	import { ConfigService } from '@nestjs/config';
+	import { FtpSrv } from 'ftp-srv';
+	
+	@Injectable()
+	export class FtpService implements OnModuleInit, OnModuleDestroy {
+		private readonly logger = new Logger(FtpService.name);
+		private readonly ftpServer: FtpSrv;
+		private readonly rootPath: string;
+		private readonly url: string;
+		
+		constructor(configService: ConfigService) {
+			this.rootPath = configService.get<string>('app.rootPath');
+			this.url = configService.get<string>('ftp.url', 'ftp://0.0.0.0:21');
+			const pasvMinPort = configService.get<number>('ftp.pasvMinPort', 4000);
+			const pasvMaxPort = configService.get<number>('ftp.pasvMaxPort', 4004);
+			
+			this.ftpServer = new FtpSrv({
+				url: this.url,
+				anonymous: true,
+				pasv_min: pasvMinPort,
+				pasv_max: pasvMaxPort,
+			});
+		}
+		
+		async onModuleInit() {
+			this.ftpServer.on('login', (_, resolve) => {
+				this.logger.log('Attempt to login');
+				resolve({ root: this.rootPath });
+			});
+			
+			await this.ftpServer.listen();
+			this.logger.log(`FTP server successfully started on url ${this.url}`);
+		}
+		
+		async onModuleDestroy() {
+			await this.ftpServer.close();
+			this.logger.log('FTP server successfully stopped');
+		}
+	}
+\end{lstlisting}
