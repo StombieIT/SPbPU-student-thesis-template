@@ -1,5 +1,7 @@
 \chapter{Разработка системы} \label{ch3}
 
+	В этой главе описан процесс разработки системы. Представлены ключевые сервисы: API-шлюз, сервисы хранения, транскодирования и загрузки видеоконтента. Рассмотрены принципы организации пользовательской аутентификации, работы с видеофайлами и взаимодействия между сервисами. Также описана реализация клиентских приложений — видеоплеера и редактора синхронизации, предназначенных для просмотра и управления многопоточным видеоконтентом.
+
 	\section{Разработка API-шлюза}
 
 	\subsection{Разработка модуля авторизации}
@@ -45,7 +47,7 @@
 
 	\begin{figure}[ht!] 
 		\center
-		\includegraphics [scale=0.4] {my_folder/images//register_processes}
+		\includegraphics [scale=0.37] {my_folder/images//register_processes}
 		\caption{Диаграмма последовательности процессов регистрации пользователя} 
 		\label{fig:register_processes}  
 	\end{figure}
@@ -54,7 +56,7 @@
 
 	\begin{figure}[ht!] 
 		\center
-		\includegraphics [scale=0.4] {my_folder/images//login_processes}
+		\includegraphics [scale=0.37] {my_folder/images//login_processes}
 		\caption{Диаграмма последовательности процессов аутентификации пользователя} 
 		\label{fig:login_processes}  
 	\end{figure}
@@ -138,16 +140,16 @@
 	\begin{lstlisting}[caption=Код старта сервиса-хранилища]
 		async function bootstrap() {
 			const [distribution] = await Promise.all([
-			NestFactory.create(DistributionModule),
-			NestFactory.createApplicationContext(UploadModule),
+				NestFactory.create(DistributionModule),
+				NestFactory.createApplicationContext(UploadModule),
 			]);
 			
 			distribution.enableCors({
 				origin: [
-				PLAYER_ORIGIN,
+					PLAYER_ORIGIN,
 				],
 				methods: [
-				'GET',
+					'GET',
 				],
 			});
 			
@@ -394,7 +396,7 @@
 
 	\begin{figure}[ht!] 
 		\center
-		\includegraphics [scale=0.33] {my_folder/images//uml_player}
+		\includegraphics [scale=0.24] {my_folder/images//uml_player}
 		\caption{UML-диаграмма компонентов интерфейса видеоплеера} 
 		\label{fig:uml_player}  
 	\end{figure}
