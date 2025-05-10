@@ -1,157 +1,76 @@
-\chapter{Программный код нагрузочного тестирования}
-\label{chap:load_testing_code}
+\chapter{Результаты ручного тестирования}
+\label{chap:manual_testing}
 
-	\begin{lstlisting}[caption={constants.js}]
-		export const JSON_HEADERS = {
-			'Content-Type': 'application/json',
-		};
-		export const OCTET_STREAM_HEADERS = {
-			'Content-Type': 'application/octet-stream',
-		};
-	\end{lstlisting}
+	\section{Редактор синхронизации}
+
+	\begin{figure}[ht!]
+		\center
+		\includegraphics [scale=0.37] {my_folder/images//uploading}
+		\caption{Мониторинг прогресса загрузки видеопотоков} 
+		\label{fig:uploading}  
+	\end{figure}
+
+	\begin{figure}[ht!]
+		\center
+		\includegraphics [scale=0.37] {my_folder/images//distribution}
+		\caption{Просмотр результата} 
+		\label{fig:distribution}  
+	\end{figure}
+
+	\section{Видеоплеер}
+
+	\begin{figure}[ht!]
+		\center
+		\includegraphics [scale=0.37] {my_folder/images//player_start}
+		\caption{Запуск видеоплеера} 
+		\label{fig:player_start}  
+	\end{figure}
+
+	\begin{figure}[ht!]
+		\center
+		\includegraphics [scale=0.37] {my_folder/images//player_playing}
+		\caption{Синхронное воспроизведение} 
+		\label{fig:player_playing}
+	\end{figure}
+
+	\begin{figure}[ht!]
+		\center
+		\includegraphics [scale=0.37] {my_folder/images//player_pause}
+		\caption{Пауза воспроизведения} 
+		\label{fig:player_pause}
+	\end{figure}
+
+	\begin{figure}[ht!]
+		\center
+		\includegraphics [scale=0.37] {my_folder/images//player_seek}
+		\caption{Перемотка по шкале} 
+		\label{fig:player_seek}
+	\end{figure}
+
+	\begin{figure}[ht!]
+		\center
+		\includegraphics [scale=0.37] {my_folder/images//player_volume_seek}
+		\caption{Регулировка громкости: перемотка по шкале} 
+		\label{fig:player_volume_seek}
+	\end{figure}
+
+	\begin{figure}[ht!]
+		\center
+		\includegraphics [scale=0.37] {my_folder/images//player_volume_mute}
+		\caption{Регулировка громкости: без звука} 
+		\label{fig:player_volume_mute}
+	\end{figure}
 	
-	\begin{lstlisting}[caption={auth.js}]
-		import http from 'k6/http';
-		import { JSON_HEADERS } from './constants.js';
-		
-		const {
-			USER_EMAIL,
-			USER_PASSWORD,
-			BASE_GATEWAY_URL,
-		} = __ENV;
-		
-		if (!USER_EMAIL) {
-			throw new Error('User email is not presented');
-		}
-		
-		if (!USER_PASSWORD) {
-			throw new Error('User password is not presented');
-		}
-		
-		export function auth() {
-			const loginPayload = JSON.stringify({
-				email: USER_EMAIL,
-				password: USER_PASSWORD,
-			});
-			
-			const res = http.post(`${BASE_GATEWAY_URL}/auth/login`, loginPayload, { headers: JSON_HEADERS });
-			
-			const { payload: { accessToken } } = res.json();
-			
-			return accessToken;
-		}
-	\end{lstlisting}
-	
-	\begin{lstlisting}[caption={utils.js}]
-		export function generateRandomBuffer(size) {
-			const buffer = new Uint8Array(size);
-			for (let i = 0; i < size; i++) {
-				buffer[i] = Math.floor(Math.random() * 256); // случайное число 0-255
-			}
-			return buffer;
-		}
-	\end{lstlisting}
-	
-	\begin{lstlisting}[caption={test.js}]
-		import http from 'k6/http';
-		import { check, sleep } from 'k6';
-		import { auth } from './auth.js';
-		import { JSON_HEADERS, OCTET_STREAM_HEADERS } from './constants.js';
-		import { generateRandomBuffer } from './utils.js';
-		
-		const {
-			VUS_COUNT = '125',
-			TITLE = 'title',
-			DESCRIPTION = 'description',
-			VIDEO_SIZE = '90000',
-			CHUNK_SIZE = '8192',
-			BASE_GATEWAY_URL,
-		} = __ENV;
-		
-		const vusCount = Number(VUS_COUNT);
-		if (isNaN(vusCount)) {
-			throw new Error('Vus count is not a number');
-		}
-		const videoSize = Number(VIDEO_SIZE);
-		if (isNaN(videoSize)) {
-			throw new Error('Video size is not a number');
-		}
-		const chunkSize = Number(CHUNK_SIZE);
-		if (isNaN(chunkSize)) {
-			throw new Error('Chunk size is not a number');
-		}
-		
-		const chunkCount = Math.ceil(VIDEO_SIZE / CHUNK_SIZE);
-		const iterationsCount = vusCount * chunkCount;
-		
-		export const options = {
-			vus: vusCount,
-			iterations: iterationsCount,
-		};
-		
-		export function setup() {
-			const accessToken = auth();
-			return { accessToken };
-		}
-		
-		const VIDEO_INFO_BY_VU = {};
-		
-		export default function ({ accessToken }) {
-			const vu = __VU;
-			const authorizationHeaders = {
-				'Authorization': `Bearer ${accessToken}`,
-			};
-			if (!VIDEO_INFO_BY_VU[vu]) {
-				const videoPayload = JSON.stringify({
-					title: TITLE,
-					description: DESCRIPTION,
-					totalBytesList: [videoSize],
-				});
-				
-				const res = http.post(`${BASE_GATEWAY_URL}/create-video`, videoPayload, { headers: {
-						...JSON_HEADERS,
-						...authorizationHeaders,
-				}});
-				check(res, {
-					'create-video': (r) => r.status === 201 || r.status === 200,
-				});
-				
-				const { payload: { id, flows } } = res.json();
-				const [flow] = flows;
-				const { uploadSession } = flow;
-				const uid = uploadSession.id;
-				VIDEO_INFO_BY_VU[vu] = {
-					id,
-					uid,
-					offset: 0,
-				};
-			}
-			
-			const info = VIDEO_INFO_BY_VU[vu];
-			const { id, uid, offset } = info;
-			const startByte = offset;
-			if (startByte >= videoSize) {
-				return;
-			}
-			const size = Math.min(videoSize - startByte, chunkSize);
-			const buffer = generateRandomBuffer(size);
-			
-			const uploadRes = http.post(`${BASE_GATEWAY_URL}/upload/${uid}`, buffer, { headers: {
-					...authorizationHeaders,
-					...OCTET_STREAM_HEADERS,
-					'x-size': size.toString(),
-					'x-start-byte': startByte.toString(),
-			}});
-			info.offset += size;
-			check(uploadRes, {
-				'upload': (r) => r.status === 201 || r.status === 200,
-			});
-			
-			const stateRes = http.get(`${BASE_GATEWAY_URL}/state/${id}`);
-			
-			check(stateRes, {
-				'state': (r) => r.status === 201 || r.status === 200,
-			});
-			sleep(0.05);
-		}
-	\end{lstlisting}
+	\begin{figure}[ht!]
+		\center
+		\includegraphics [scale=0.37] {my_folder/images//player_volume_full}
+		\caption{Регулировка громкости: максимальное значение} 
+		\label{fig:player_volume_full}
+	\end{figure}
+
+	\begin{figure}[ht!]
+		\center
+		\includegraphics [scale=0.37] {my_folder/images//player_full_screen}
+		\caption{Полноэкранный режим} 
+		\label{fig:player_full_screen}
+	\end{figure}

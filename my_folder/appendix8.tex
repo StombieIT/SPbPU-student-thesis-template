@@ -1,76 +1,405 @@
-\chapter{Результаты ручного тестирования}
-\label{chap:manual_testing}
+\chapter{Программный код автоматизированного тестирования}
+\label{chap:autotests_code}
 
-	\section{Редактор синхронизации}
+	\begin{lstlisting}[caption={pages/auth-modal.ts}]
+		import { Locator, Page } from '@playwright/test';
+		import { SynchronizingPage } from './synchronizing-page';
+		import { AuthorizedPage } from './authorized-page';
+		
+		const LOG_IN_BUTTON_TEXT = 'Вход';
+		const REGISTER_BUTTON_TEXT = 'Регистрация';
+		const EMAIL_PLACEHOLDER = 'Email';
+		const PASSWORD_PLACEHOLDER = 'Пароль';
+		const PASSWORD_REPEAT_PLACEHOLDER = 'Повторный пароль';
+		const SUBMIT_BUTTON_TEXT = 'Отправить';
+		
+		export class AuthModal {
+			private readonly page: Page;
+			private readonly logInButton: Locator;
+			private readonly registerButton: Locator;
+			
+			constructor(page: Page) {
+				this.page = page;
+				this.logInButton = page.getByText(LOG_IN_BUTTON_TEXT);
+				this.registerButton = page.getByText(REGISTER_BUTTON_TEXT);
+			}
+			
+			getForm(): Locator {
+				return this.page.locator('form');
+			}
+			
+			async open() {
+				await this.page.goto('/');
+			}
+			
+			async switchToLogIn() {
+				await this.logInButton.click();
+			}
+			
+			async switchToRegister() {
+				await this.registerButton.click();
+			}
+			
+			async fillEmail(email: string) {
+				await this.page.getByPlaceholder(EMAIL_PLACEHOLDER).fill(email);
+			}
+			
+			async fillPassword(password: string) {
+				await this.page.getByPlaceholder(PASSWORD_PLACEHOLDER, { exact: true }).fill(password);
+			}
+			
+			async fillPasswordRepeat(passwordRepeat: string) {
+				await this.page.getByPlaceholder(PASSWORD_REPEAT_PLACEHOLDER).fill(passwordRepeat);
+			}
+			
+			async submit(): Promise<AuthorizedPage | null> {
+				await this.page.getByRole('button', {
+					name: SUBMIT_BUTTON_TEXT,
+				}).click();
+				try {
+					await this.logInButton.waitFor({
+						state: 'hidden',
+						timeout: 5000,
+					});
+					return new SynchronizingPage(this.page);
+				} catch (error) {
+					return null;
+				}
+			}
+		}
+	\end{lstlisting}
 
-	\begin{figure}[ht!]
-		\center
-		\includegraphics [scale=0.37] {my_folder/images//uploading}
-		\caption{Мониторинг прогресса загрузки видеопотоков} 
-		\label{fig:uploading}  
-	\end{figure}
-
-	\begin{figure}[ht!]
-		\center
-		\includegraphics [scale=0.37] {my_folder/images//distribution}
-		\caption{Просмотр результата} 
-		\label{fig:distribution}  
-	\end{figure}
-
-	\section{Видеоплеер}
-
-	\begin{figure}[ht!]
-		\center
-		\includegraphics [scale=0.37] {my_folder/images//player_start}
-		\caption{Запуск видеоплеера} 
-		\label{fig:player_start}  
-	\end{figure}
-
-	\begin{figure}[ht!]
-		\center
-		\includegraphics [scale=0.37] {my_folder/images//player_playing}
-		\caption{Синхронное воспроизведение} 
-		\label{fig:player_playing}
-	\end{figure}
-
-	\begin{figure}[ht!]
-		\center
-		\includegraphics [scale=0.37] {my_folder/images//player_pause}
-		\caption{Пауза воспроизведения} 
-		\label{fig:player_pause}
-	\end{figure}
-
-	\begin{figure}[ht!]
-		\center
-		\includegraphics [scale=0.37] {my_folder/images//player_seek}
-		\caption{Перемотка по шкале} 
-		\label{fig:player_seek}
-	\end{figure}
-
-	\begin{figure}[ht!]
-		\center
-		\includegraphics [scale=0.37] {my_folder/images//player_volume_seek}
-		\caption{Регулировка громкости: перемотка по шкале} 
-		\label{fig:player_volume_seek}
-	\end{figure}
-
-	\begin{figure}[ht!]
-		\center
-		\includegraphics [scale=0.37] {my_folder/images//player_volume_mute}
-		\caption{Регулировка громкости: без звука} 
-		\label{fig:player_volume_mute}
-	\end{figure}
+	\begin{lstlisting}[caption={pages/authorized-page.ts}]
+		import { Locator, Page } from '@playwright/test';
+		import { AuthModal } from './auth-modal';
+		
+		const LOGOUT_BUTTON_TEXT = 'Выход';
+		
+		export class AuthorizedPage {
+			private readonly logOutButton: Locator;
+			
+			constructor(protected readonly page: Page) {
+				this.logOutButton = page.getByRole('button', { name: 'Выход' });
+			}
+			
+			async logOut(): Promise<AuthModal | null> {
+				await this.logOutButton.click();
+				try {
+					await this.logOutButton.waitFor({
+						state: 'hidden',
+						timeout: 5000,
+					});
+					return new AuthModal(this.page);
+				} catch (error) {
+					return null;
+				}
+			}
+		}
+	\end{lstlisting}
 	
-	\begin{figure}[ht!]
-		\center
-		\includegraphics [scale=0.37] {my_folder/images//player_volume_full}
-		\caption{Регулировка громкости: максимальное значение} 
-		\label{fig:player_volume_full}
-	\end{figure}
+	\begin{lstlisting}[caption={pages/synchronizing-page.ts}]
+		import { Locator, Page } from '@playwright/test';
+		import { AuthorizedPage } from './authorized-page';
+		
+		const TITLE_PLACEHOLDER = 'Заголовок видео';
+		const DESCRIPTION_PLACEHOLDER = 'Описание видео';
+		const ADD_FLOW_BUTTON_LABEL = 'Добавить поток';
+		const UPLOAD_BUTTON_LABEL = 'Загрузить';
+		const DELETE_BUTTON_LABEL = 'Удалить';
+		const MOTIVATION_TEXT_TEST_ID = 'motivation-text';
+		const FLOW_CANDIDATE_TEST_ID = 'flow-candidate';
+		const FLOWS_GRID_TEST_ID = 'flows-grid';
+		const INPUT_FILE_SELECTOR = 'input[type="file"]';
+		const VIDEO_SELECTOR = 'video';
+		
+		export class SynchronizingPage extends AuthorizedPage {
+			private readonly titleField: Locator;    
+			private readonly descriptionField: Locator;    
+			private readonly uploadButton: Locator;
+			private readonly flowCandidate: Locator;
+			
+			constructor(page: Page) {
+				super(page);
+				this.titleField = this.page.getByPlaceholder(TITLE_PLACEHOLDER);
+				this.descriptionField = this.page.getByPlaceholder(DESCRIPTION_PLACEHOLDER);
+				this.uploadButton = this.page.getByRole('button', { name: UPLOAD_BUTTON_LABEL });
+				this.flowCandidate = this.page.getByTestId(FLOW_CANDIDATE_TEST_ID);
+			}
+			
+			getMotivationText(): Locator {
+				return this.page.getByTestId(MOTIVATION_TEXT_TEST_ID);
+			}
+			
+			getFlowsGrid(): Locator {
+				return this.page.getByTestId(FLOWS_GRID_TEST_ID);
+			}
+			
+			getVideoLocator(): Locator {
+				return this.page.locator(VIDEO_SELECTOR);
+			}
+			
+			getUploadButton(): Locator {
+				return this.uploadButton;
+			}
+			
+			async fillTitle(title: string) {
+				await this.titleField.fill(title);
+			}
+			
+			async fillDescription(description: string) {
+				await this.descriptionField.fill(description);
+			}
+			
+			async addFlow() {
+				const addFlowButton = this.page.getByRole('button', { name: ADD_FLOW_BUTTON_LABEL });
+				await this.checkDisabled(addFlowButton);
+				await addFlowButton.click();
+			}
+			
+			async getFlowsCount() {
+				return await this.flowCandidate.count();
+			}
+			
+			async addVideoToFlow(flowIdx: number, video: Buffer) {
+				await this.flowCandidate
+				.nth(flowIdx)
+				.locator(INPUT_FILE_SELECTOR)
+				.setInputFiles({
+					name: `flow-${flowIdx}.mp4`,
+					mimeType: 'video/mp4',
+					buffer: video,
+				});
+			}
+			
+			async deleteFlow(flowIdx: number) {
+				await this.flowCandidate
+				.nth(flowIdx)
+				.getByRole('button', { name: DELETE_BUTTON_LABEL })
+				.click();
+			}
+			
+			async uploadFlow() {
+				const uploadButton = this.getUploadButton();
+				await this.checkDisabled(uploadButton);
+				await uploadButton.click();
+			}
+			
+			private async checkDisabled(locator: Locator) {
+				const isDisabled = await locator.isDisabled();
+				if (isDisabled) {
+					throw new Error('Элемент не активен');
+				}
+			}
+		}
+	\end{lstlisting}
 
-	\begin{figure}[ht!]
-		\center
-		\includegraphics [scale=0.37] {my_folder/images//player_full_screen}
-		\caption{Полноэкранный режим} 
-		\label{fig:player_full_screen}
-	\end{figure}
+	\begin{lstlisting}[caption={tests/sync-editor/auth.spec.ts}]
+		import { expect, test } from '@playwright/test';
+		import { AuthModal } from '../../pages/sync-editor/auth-modal';
+		import { v4 as uuid } from 'uuid';
+		
+		const {
+			USER_EMAIL,
+			USER_PASSWORD,
+		} = process.env;
+		
+		test.describe('Аутентификация/Авторизация', () => {
+			test('ui формы входа', async ({ page }) => {
+				const authModal = new AuthModal(page);
+				
+				await authModal.open();
+				await authModal.switchToLogIn();
+				
+				const form = authModal.getForm();
+				await expect(form).toHaveScreenshot('login.png');
+			});
+			
+			test('ui формы регистрации', async ({ page }) => {
+				const authModal = new AuthModal(page);
+				
+				await authModal.open();
+				await authModal.switchToRegister();
+				
+				const form = authModal.getForm();
+				await expect(form).toHaveScreenshot('register.png');
+			});
+			
+			test('вход с помощью тестовых данных', async ({ page }) => {
+				expect(USER_EMAIL, 'Email должен быть задан').toBeTruthy();
+				expect(USER_PASSWORD, 'Пароль должен быть задан').toBeTruthy();
+				
+				const authModal = new AuthModal(page);
+				
+				await authModal.open();
+				await authModal.switchToLogIn();
+				await authModal.fillEmail(USER_EMAIL!);
+				await authModal.fillPassword(USER_PASSWORD!);
+				const authorizedPage = await authModal.submit();
+				
+				expect(authorizedPage, 'Модальное окно скрывается').toBeTruthy();
+			});
+			
+			test('вход и выход', async ({ page }) => {
+				let authModal: AuthModal | null = new AuthModal(page);
+				
+				await authModal.open();
+				await authModal.switchToLogIn();
+				await authModal.fillEmail(USER_EMAIL!);
+				await authModal.fillPassword(USER_PASSWORD!);
+				const authorizedPage = await authModal.submit();
+				
+				expect(authorizedPage, 'Модальное окно скрывается').toBeTruthy();
+				
+				authModal = await authorizedPage!.logOut();
+				
+				expect(authModal, 'Модальное окно открывается при выходе').toBeTruthy();
+			});
+			
+			test('успешная регистрация и вход', async ({ page }) => {        
+				const email = `${uuid()}@${uuid()}.${uuid()}`;
+				const password = uuid();
+				
+				const authModal = new AuthModal(page);
+				
+				await authModal.open();
+				await authModal.switchToRegister();
+				await authModal.fillEmail(email);
+				await authModal.fillPassword(password);
+				await authModal.fillPasswordRepeat(password);
+				await authModal.submit();
+				
+				await authModal.switchToLogIn();
+				const authorizedPage = await authModal.submit();
+				
+				expect(authorizedPage, 'Модальное окно скрывается').toBeTruthy();
+			});
+		});
+	\end{lstlisting}
+
+	\begin{lstlisting}[caption={tests/sync-editor/synchronizing.spec.ts}]
+		import { expect, test } from '@playwright/test';
+		import * as fs from 'fs/promises';
+		import * as path from 'path';
+		import { AuthModal } from '../../pages/sync-editor/auth-modal';
+		import { SynchronizingPage } from '../../pages/sync-editor/synchronizing-page';
+		
+		const {
+			USER_EMAIL,
+			USER_PASSWORD,
+		} = process.env;
+		
+		const MAX_FLOWS_COUNT = 4;
+		const UPLOADING_MAX_FLOWS_COUNT = 2;
+		const VIDEO_TITLE = 'video';
+		const VIDEO_DESCRIPTION = 'description';
+		
+		test.describe('Страница синхронизации', () => {
+			let videoBuffer: Buffer;
+			
+			test.beforeAll(async () => {
+				videoBuffer = await fs.readFile(
+				path.resolve(__dirname, 'data', 'test-video.mp4')
+				);
+			});
+			
+			test.beforeEach(async ({ page }) => {
+				const authModal = new AuthModal(page);
+				
+				await authModal.open();
+				await authModal.switchToLogIn();
+				await authModal.fillEmail(USER_EMAIL!);
+				await authModal.fillPassword(USER_PASSWORD!);
+				await authModal.submit();
+			});    
+			
+			test('ui сетки потоков', async ({ page }) => {
+				const synchronizing = new SynchronizingPage(page);
+				
+				for (let i = 0; i < MAX_FLOWS_COUNT; i++) {
+					await synchronizing.addFlow();
+					const flowGrid = synchronizing.getFlowsGrid();
+					await expect(flowGrid).toHaveScreenshot(`flow_grid_${i + 1}.png`);
+				}
+			});
+			
+			test('ограничение на количество потоков', async ({ page }) => {
+				const synchronizing = new SynchronizingPage(page);     
+				
+				for (let i = 0; i < MAX_FLOWS_COUNT; i++) {
+					await synchronizing.addFlow();
+				}
+				
+				await expect(synchronizing.addFlow).rejects.toThrow();
+			});
+			
+			test('добавление и удаление потоков', async ({ page }) => {
+				const synchronizing = new SynchronizingPage(page);
+				
+				const flowsGrid = synchronizing.getFlowsGrid();
+				
+				const screenshotOptions = {
+					mask: [
+					synchronizing.getVideoLocator(),
+					]
+				};
+				
+				for (let i = 0; i < MAX_FLOWS_COUNT; i++) {
+					await synchronizing.addFlow();
+					await expect(flowsGrid).toHaveScreenshot(`adding-${i + 1}.png`, screenshotOptions);
+				}
+				
+				for (let i = MAX_FLOWS_COUNT - 1; i >= 1; i--) {
+					await synchronizing.deleteFlow(0);
+					await expect(flowsGrid).toHaveScreenshot(`deleting-${i}.png`, screenshotOptions);
+				}
+				
+				await synchronizing.deleteFlow(0);
+				await expect(flowsGrid).toBeHidden();
+			});
+			
+			test('загрузка видео в потоки', async ({ page }) => {
+				const synchronizing = new SynchronizingPage(page);
+				
+				for (let i = 0; i < UPLOADING_MAX_FLOWS_COUNT; i++) {
+					await synchronizing.addFlow();
+				}
+				
+				const flowsGrid = synchronizing.getFlowsGrid();
+				
+				await expect(flowsGrid).toHaveScreenshot('uploading_grid_init.png');
+				
+				for (let i = 0; i < UPLOADING_MAX_FLOWS_COUNT; i++) {
+					
+					await synchronizing.addVideoToFlow(i, videoBuffer);
+					
+					await expect(flowsGrid).toHaveScreenshot(`uploading_grid_${i + 1}.png`, {
+						mask: [
+						synchronizing.getVideoLocator(),
+						]
+					});
+				}
+			});
+			
+			test('валидация перед загрузкой', async ({ page }) => {
+				const synchronizing = new SynchronizingPage(page);
+				
+				const uploadButton = synchronizing.getUploadButton();
+				await expect(uploadButton).toBeHidden();
+				
+				await synchronizing.addFlow();
+				await expect(synchronizing.uploadFlow).rejects.toThrow();
+				await synchronizing.fillTitle(VIDEO_TITLE);
+				await expect(synchronizing.uploadFlow).rejects.toThrow();
+				await synchronizing.fillDescription(VIDEO_DESCRIPTION);
+				await expect(synchronizing.uploadFlow).rejects.toThrow();
+				await synchronizing.addFlow();
+				
+				await synchronizing.addVideoToFlow(0, videoBuffer);
+				await expect(synchronizing.uploadFlow).rejects.toThrow();
+				await synchronizing.addVideoToFlow(1, videoBuffer);
+				await synchronizing.uploadFlow();
+				
+				await expect(synchronizing.uploadFlow).rejects.toThrow();
+			});
+		});
+	\end{lstlisting}
